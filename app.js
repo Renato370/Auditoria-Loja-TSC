@@ -3,8 +3,8 @@
 'use strict';
 
 const CFG = window.APP_CONFIG || {};
-const APP_VERSION = '1.0.0';
-const MIN_SERVER = '1.0.0';
+const APP_VERSION = '1.1.0';
+const MIN_SERVER = '1.1.0';
 
 /* ============================ Utilidades ============================ */
 const $ = (s, r = document) => r.querySelector(s);
@@ -107,7 +107,7 @@ const KV = (() => {
 /* ============================ Estado ============================ */
 const COLMAP = {
   Id: 'id', HoraRegistro: 'hora', Data: 'data', Auditor: 'auditor', IdLoja: 'idLoja', Loja: 'loja', Categoria: 'cat', Tipo: 'tipo',
-  Numero: 'num', FormaPagamento: 'forma', Valor: 'valor', Genero: 'genero', FaixaEtaria: 'faixa', Motivo: 'motivo', Observacao: 'obs'
+  Numero: 'num', FormaPagamento: 'forma', Valor: 'valor', Genero: 'genero', FaixaEtaria: 'faixa', Motivo: 'motivo', Observacao: 'obs', Recebido: 'recebido'
 };
 const CATS = ['Venda', 'Visita', 'Venda perdida', 'Anotação'];
 const CF = 'CF / NF', SD = 'Sem Documento';
@@ -118,6 +118,7 @@ const LISTAS_PADRAO = {
   generos: ['Masculino', 'Feminino']
 };
 const FORMA_CURTA = { 'Cartão de crédito': 'Crédito', 'Cartão de débito': 'Débito', 'Retirada de mercadoria': 'Retirada', 'Troco não devolvido': 'Troco', 'Troca zerada': 'Troca' };
+const FORMA_BOTAO = { 'Cartão de crédito': 'Crédito', 'Cartão de débito': 'Débito', 'Retirada de mercadoria': 'Retirada' };   // rótulos dos botões do formulário
 const formaCurta = f => FORMA_CURTA[f] || f || '(sem forma)';
 const ehOnline = f => /^online$/i.test(String(f || ''));
 
@@ -224,6 +225,79 @@ function solicAll() {
 }
 const solicPendente = id => solicAll().find(x => x.LancamentoId === id && x.Status === 'Pendente');
 
+/* ---------- Venda informada pelo lojista (por dia) ---------- */
+function declMap() {
+  const m = new Map();
+  ((S.data && S.data.declarados) || []).forEach(x => m.set(x.Data, { valor: +x.Valor, por: x.Por, idLoja: x.IdLoja }));
+  S.queue.forEach(q => {
+    if (q.type !== 'decl') return;
+    const lj = lojaDoMes(q.decl.Data.slice(0, 7));
+    if (q.decl.Valor === '' && !q.error) m.delete(q.decl.Data);
+    else if (q.decl.Valor !== '') m.set(q.decl.Data, { valor: +q.decl.Valor, por: S.user && S.user.nome, idLoja: lj ? lj.IdLoja : '', _pending: true, _error: q.error || '' });
+  });
+  return m;
+}
+const declDia = (dia, idLoja) => { const x = declMap().get(dia); return x && (!idLoja || x.idLoja === idLoja) ? x : null; };
+function difTxt(aud, decl) {
+  const d = Math.round((aud - decl) * 100) / 100;
+  return d === 0 ? 'Valores iguais' : d > 0 ? 'Auditoria viu ' + money(d) + ' a mais que o informado' : 'Lojista informou ' + money(-d) + ' a mais que o auditado';
+}
+
+/* ---------- Ponto do auditor ---------- */
+const JEV = ['Chegada', 'SaidaIntervalo', 'VoltaIntervalo', 'Encerramento'];
+const JEV_NOME = { Chegada: 'Chegada na loja', SaidaIntervalo: 'Saída para o intervalo', VoltaIntervalo: 'Volta do intervalo', Encerramento: 'Encerramento do dia' };
+function jornAll() {
+  const cols = (S.data && S.data.jornCols) || [];
+  const list = ((S.data && S.data.jornadas) || []).map(r => { const o = {}; cols.forEach((c, i) => { o[c] = r[i]; }); return o; });
+  S.queue.forEach(q => {
+    if (q.type !== 'ponto' || !S.user || (q.uid && q.uid !== S.user.id)) return;
+    const d = q.ponto.Hora.slice(0, 10);
+    let o = list.find(x => x.Data === d && x.IdAuditor === S.user.id);
+    if (!o) { const lj = lojaDoMes(d.slice(0, 7)); o = { Data: d, IdAuditor: S.user.id, Auditor: S.user.nome, IdLoja: lj ? lj.IdLoja : '', Loja: lj ? lj.NomeFantasia : '', Chegada: '', SaidaIntervalo: '', VoltaIntervalo: '', Encerramento: '' }; list.push(o); }
+    if (q.error) { o._error = q.error; return; }
+    if (!o[q.ponto.Evento]) o[q.ponto.Evento] = q.ponto.Hora.slice(11, 16);
+    o._pending = true;
+  });
+  return list;
+}
+const hmMin = s => +s.slice(0, 2) * 60 + +s.slice(3, 5);
+const minToH = m => Math.floor(m / 60) + 'h' + pad(m % 60);
+function jornTrab(j) {
+  if (!j.Chegada || !j.Encerramento) return null;
+  let m = hmMin(j.Encerramento) - hmMin(j.Chegada);
+  if (j.SaidaIntervalo && j.VoltaIntervalo) m -= hmMin(j.VoltaIntervalo) - hmMin(j.SaidaIntervalo);
+  return Math.max(0, m);
+}
+function jornTexto(j) {
+  const p = [];
+  p.push(j.Chegada ? j.Chegada + (j.Encerramento ? ' às ' + j.Encerramento : j.Data < today() ? ' (sem encerramento)' : ' (em andamento)') : 'sem chegada');
+  if (j.SaidaIntervalo) p.push('intervalo ' + j.SaidaIntervalo + (j.VoltaIntervalo ? ' às ' + j.VoltaIntervalo : ' (sem volta)'));
+  const t = jornTrab(j); if (t != null) p.push(minToH(t) + ' trabalhadas');
+  return p.join(' · ');
+}
+function jornRowHtml(j, comData) {
+  const m = isMaster() && !j._pending;
+  const tags = j._error ? '<span class="pill bad">Não aceito</span> ' : j._pending ? '<span class="pill mut">Na fila</span> ' : '';
+  return `<${m ? 'button' : 'div'} class="row" ${m ? `data-act="jornForm" data-dia="${j.Data}" data-aud="${esc(j.IdAuditor)}"` : ''}><div><div class="t cap">${comData ? esc(DOW[new Date(j.Data + 'T12:00:00').getDay()].slice(0, 3) + ' ' + dBR(j.Data).slice(0, 5)) + ' · ' : ''}${esc(j.Auditor)}</div>
+    <div class="s">${tags}${esc(jornTexto(j))}</div></div><div class="v muted">${m ? ICON.right.replace('<svg', '<svg style="width:18px;height:18px"') : ''}</div></${m ? 'button' : 'div'}>`;
+}
+function pontoHtml() {
+  const hoje = today();
+  const j = jornAll().find(x => x.Data === hoje && x.IdAuditor === S.user.id) || {};
+  const marc = [['Chegada', 'Chegada'], ['SaidaIntervalo', 'Saiu p/ intervalo'], ['VoltaIntervalo', 'Voltou'], ['Encerramento', 'Encerrou']].filter(([k]) => j[k]).map(([k, t]) => `<span><small>${t}</small><b class="num">${j[k]}</b></span>`).join('');
+  const bt = (ev, t, pri) => `<button class="btn${pri ? ' primary' : ''}" data-act="ponto" data-ev="${ev}">${t}</button>`;
+  let bts = '';
+  if (!j.Chegada) bts = bt('Chegada', 'Cheguei na loja', true);
+  else if (j.Encerramento) bts = '';
+  else if (j.SaidaIntervalo && !j.VoltaIntervalo) bts = bt('VoltaIntervalo', 'Voltei do intervalo', true);
+  else bts = (j.SaidaIntervalo ? '' : bt('SaidaIntervalo', 'Sair para o intervalo')) + bt('Encerramento', 'Encerrar o dia');
+  return `<div class="section gutter"><div class="card ponto"><div class="ponto-h">${ICON.clock}<b>Seu ponto hoje</b>${j._error ? '<span class="pill bad">Não aceito</span>' : j._pending ? '<span class="pill mut">Na fila</span>' : ''}</div>
+    ${j._error ? `<div class="muted">${esc(j._error)}</div>` : ''}
+    ${marc ? `<div class="ponto-m">${marc}</div>` : '<div class="muted">Toque ao entrar na loja. A hora é registrada na hora do toque.</div>'}
+    ${j.Encerramento ? `<div class="muted">Dia encerrado${jornTrab(j) != null ? ' · ' + minToH(jornTrab(j)) + ' trabalhadas' : ''}.</div>` : ''}
+    ${bts ? `<div class="ponto-b">${bts}</div>` : ''}</div></div>`;
+}
+
 /* Lojas que aparecem num mês (a do mês + as que têm lançamentos) */
 function lojasNoMes(m) {
   const ids = new Set(Object.keys((S.data && S.data.meses && S.data.meses[m]) || {}));
@@ -293,7 +367,20 @@ async function pushItem(item) {
   } else if (item.type === 'solic') {
     const r = await api('solicitar', { solic: item.solic });
     if (r.solicitacao) guardarSolic(r.solicitacao);
+  } else if (item.type === 'decl') {
+    const r = await api('salvarDeclarado', { decl: item.decl });
+    if (S.data && r.declarados) { S.data.declarados = r.declarados; S.ver++; }
+  } else if (item.type === 'ponto') {
+    const r = await api('marcarPonto', { ponto: item.ponto });
+    if (r.jornada) guardarJorn(r.cols, r.jornada);
   }
+}
+function guardarJorn(cols, row) {
+  if (!S.data) return;
+  S.data.jornCols = cols;
+  const iD = cols.indexOf('Data'), iA = cols.indexOf('IdAuditor');
+  S.data.jornadas = (S.data.jornadas || []).filter(x => !(x[iD] === row[iD] && x[iA] === row[iA])).concat([row]);
+  S.ver++;
 }
 function guardarLanc(l) {
   const novo = !S.lmap.has(l.id);
@@ -524,14 +611,15 @@ VIEWS.inicio = () => {
     corpo = `<div class="section gutter"><div class="alert warn">${isMaster() ? 'Escolha a loja que será auditada em ' + mesNome(mes) + ' para liberar os lançamentos.' : 'O master ainda não escolheu a loja auditada em ' + mesNome(mes) + '. Fale com ele para liberar os lançamentos.'}
       ${isMaster() ? `<button data-act="lojaMesForm" data-mes="${mes}">Escolher a loja do mês</button>` : ''}</div></div>`;
   } else {
-    const dia = doDia(hoje, loja.IdLoja), r = resumo(dia);
-    corpo = `<div class="section gutter"><div class="cats">
+    const dia = doDia(hoje, loja.IdLoja), r = resumo(dia), dc = declDia(hoje, loja.IdLoja);
+    corpo = `${isMaster() ? '' : pontoHtml()}<div class="section gutter"><div class="cats">
         <button class="cat main" data-novo="Venda">${ICON.receipt}<span>Venda</span><small>Cupom, forma de pagamento e valor</small></button>
         <button class="cat" data-novo="Visita">${ICON.eye}<span>Visita</span><small>Entrou e não comprou</small></button>
         <button class="cat" data-novo="Venda perdida">${ICON.lost}<span>Venda perdida</span><small>Queria comprar e não levou</small></button>
         <button class="cat wide" data-novo="Anotação">${ICON.note}<span>Anotação<small>Nota cancelada, reserva, ocorrência no caixa</small></span></button>
       </div></div>
       <div class="section gutter"><h2 class="h2">Hoje<button class="linkbtn" data-act="verDia" data-dia="${hoje}">Resumo por horário</button></h2>${kpisHtml(r)}</div>
+      <div class="section"><div class="list"><button class="menu" data-act="declForm" data-dia="${hoje}"><span>Venda informada pelo lojista<small>${dc ? 'Hoje: ' + money(dc.valor) + ' · ' + esc(difTxt(r.total, dc.valor)) : 'Informe o total que a loja declarou no dia'}</small></span>${ICON.right}</button></div></div>
       <div class="section"><h2 class="h2 gutter">Últimos lançamentos<button class="linkbtn" data-tab="lista">Ver todos</button></h2>
         ${dia.length ? `<div class="list">${dia.slice(0, 6).map(l => lancRow(l)).join('')}</div>` : '<div class="card" style="margin:0 16px">' + vazio('Nenhum lançamento hoje.') + '</div>'}</div>`;
   }
@@ -545,7 +633,7 @@ VIEWS.inicio = () => {
 /* ---------- Formulário de lançamento ---------- */
 function opcoes(id, rotulo, grp, itens, sel, { req = true, curto = false, dica = '' } = {}) {
   return `<div class="field" id="${id}"><span class="label">${rotulo}${req ? '<span class="req" style="color:var(--brand)"> *</span>' : ''}${dica ? `<span class="opt-tag" id="${id}Dica">${dica}</span>` : `<span class="opt-tag" id="${id}Dica"></span>`}</span>
-    <div class="opts" role="group">${itens.map(x => `<button type="button" data-grp="${grp}" data-val="${esc(x)}" aria-pressed="${sel === x}">${esc(curto ? formaCurta(x) : x)}</button>`).join('')}</div></div>`;
+    <div class="opts" role="group">${itens.map(x => `<button type="button" data-grp="${grp}" data-val="${esc(x)}" aria-pressed="${sel === x}">${esc(curto ? FORMA_BOTAO[x] || x : x)}</button>`).join('')}</div></div>`;
 }
 const grpVal = g => { const b = $(`[data-grp="${g}"][aria-pressed="true"]`); return b ? b.dataset.val : ''; };
 function fieldErr(id, msg) {
@@ -576,16 +664,21 @@ VIEWS.form = p => {
   const b = base || {};
   const venda = cat === 'Venda', perfil = cat !== 'Anotação';
   const numVal = base ? (b.num || '') : (ult ? ult + 1 : '');
+  const novo = !base, audNovo = novo && !isMaster();
+  const tipoSel = b.tipo || (novo && venda ? CF : '');          // a maioria das vendas tem cupom: já vem marcado
+  const quando = `<div class="two"><input class="input" id="fData" type="date" value="${(base ? base.data : hoje)}" max="${hoje}" aria-label="Data">
+        <input class="input" id="fHora" type="time" value="${base ? base.hora.slice(11, 16) : nowHM()}" aria-label="Hora"></div>`;
+  const motivoCampo = (hid, ph) => `<div class="field" id="fdMot" ${hid ? 'hidden' : ''}><label for="fMot">Motivo do pedido<span class="req"> *</span></label><textarea class="input" id="fMot" maxlength="500" placeholder="${ph}"></textarea></div>`;
   const titulo = p.pedido ? 'Pedir alteração' : p.edit ? 'Editar ' + cat.toLowerCase() : 'Nova ' + cat.toLowerCase();
   return {
     form: true,
     html: topbar({ title: titulo, sub: loja ? loja.NomeFantasia : '', backBtn: true }) + `<main class="wrap form-main"><div class="fields gutter">
       ${p.pedido ? '<div class="alert warn">Corrija os campos e explique o motivo. O lançamento só muda depois que o master aprovar.</div>' : ''}
-      ${venda ? opcoes('fdTipo', 'Documento', 'tipo', [CF, SD], b.tipo || '') : ''}
-      ${venda ? `<div class="field" id="fdNum" ${b.tipo === CF ? '' : 'hidden'}><label for="fNum">Número do cupom ou nota<span class="req"> *</span></label>
+      ${venda ? opcoes('fdTipo', 'Documento', 'tipo', [CF, SD], tipoSel) : ''}
+      ${venda ? `<div class="field" id="fdNum" ${tipoSel === CF ? '' : 'hidden'}><label for="fNum">Número do cupom ou nota<span class="req"> *</span></label>
         <input class="input num" id="fNum" inputmode="numeric" autocomplete="off" value="${esc(numVal)}">
         <div class="hint">${ult ? (base ? 'Último cupom lançado: nº ' + ult + '.' : 'Sugestão: o último lançado foi o nº ' + ult + '. Confira com o cupom.') : 'Digite o número impresso no cupom.'}</div></div>` : ''}
-      ${venda ? opcoes('fdForma', 'Forma de pagamento', 'forma', lista('formas').concat(b.forma && lista('formas').indexOf(b.forma) < 0 ? [b.forma] : []), b.forma || '') : ''}
+      ${venda ? opcoes('fdForma', 'Forma de pagamento', 'forma', lista('formas').concat(b.forma && lista('formas').indexOf(b.forma) < 0 ? [b.forma] : []), b.forma || '', { curto: true }) : ''}
       ${venda ? `<div class="field" id="fdValor"><label for="fValor">Valor<span class="req"> *</span></label>
         <input class="input money num" id="fValor" inputmode="numeric" autocomplete="off" placeholder="R$ 0,00" value="${b.valor !== '' && b.valor != null ? money(b.valor) : ''}"></div>` : ''}
       ${cat === 'Venda perdida' ? opcoes('fdMotivo', 'Motivo', 'motivo', lista('motivos').concat(b.motivo && lista('motivos').indexOf(b.motivo) < 0 ? [b.motivo] : []), b.motivo || '') : ''}
@@ -593,19 +686,23 @@ VIEWS.form = p => {
       ${perfil ? opcoes('fdFaixa', 'Faixa etária', 'faixa', lista('faixas'), b.faixa || '') : ''}
       <div class="field" id="fdObs"><label for="fObs">${cat === 'Anotação' ? 'Anotação<span class="req"> *</span>' : 'Observação'}</label>
         <textarea class="input" id="fObs" maxlength="500" placeholder="${cat === 'Anotação' ? 'Ex.: nota nº 45169 foi cancelada' : venda ? 'Ex.: motivo de não ter emitido o cupom' : 'Ex.: o que o cliente procurava'}">${esc(b.obs || '')}</textarea></div>
-      <div class="field" id="fdHora"><span class="label">Data e hora</span><div class="two">
-        <input class="input" id="fData" type="date" value="${(base ? base.data : hoje)}" max="${hoje}" ${isMaster() && !p.pedido ? '' : 'readonly disabled'}>
-        <input class="input" id="fHora" type="time" value="${base ? base.hora.slice(11, 16) : nowHM()}"></div>
-        <div class="hint">${base ? '' : 'Se o lançamento está sendo feito depois, ajuste a hora em que a venda aconteceu.'}</div></div>
-      ${p.pedido ? `<div class="field" id="fdMot"><label for="fMot">Motivo do pedido<span class="req"> *</span></label><textarea class="input" id="fMot" maxlength="500" placeholder="Ex.: digitei o valor errado"></textarea></div>` : ''}
+      ${audNovo ? `<div class="field" id="fdAgora"><span class="label">Data e hora</span>
+          <div class="agora">${ICON.clock}<span><b>Agora</b><small>Vale a hora em que você salvar. Não dá para alterar.</small></span></div>
+          <button type="button" class="linkbtn" style="justify-self:start" data-act="outroHorario">Aconteceu em outro dia ou horário?</button></div>
+        <div class="field" id="fdHora" hidden><span class="label">Quando aconteceu<span class="req"> *</span></span>${quando}
+          <div class="hint">Lançamento em outro dia ou horário vai como pedido. Ele só entra depois que o master aprovar.</div></div>
+        ${motivoCampo(true, 'Ex.: estava sem bateria na hora da venda')}`
+        : `<div class="field" id="fdHora"><span class="label">Data e hora</span>${quando}
+          <div class="hint">${p.pedido ? 'Mudar a data ou a hora também depende da aprovação do master.' : ''}</div></div>
+        ${p.pedido ? motivoCampo(false, 'Ex.: digitei o valor errado') : ''}`}
       <div id="dupBox"></div>
     </div></main>
-    <div class="formbar"><button class="btn" data-act="back">Cancelar</button><button class="btn primary" data-act="saveForm">${p.pedido ? 'Enviar pedido' : 'Salvar'}</button></div>`,
-    mount() { formSync(); S.dupOk = false; S.horaIni = $('#fHora').value; }
+    <div class="formbar">${novo ? '<button class="btn" data-act="saveNova" id="btNova">Salvar e nova</button>' : '<button class="btn" data-act="back">Cancelar</button>'}<button class="btn primary" data-act="saveForm" id="btSalvar">${p.pedido ? 'Enviar pedido' : 'Salvar'}</button></div>`,
+    mount() { formSync(); S.dupOk = false; S.incl = false; S.horaIni = $('#fHora').value; }
   };
 };
 
-function saveForm() {
+function saveForm(outra) {
   const p = cur().p, alvo = p.edit || p.pedido;
   const base = alvo ? merged().byId.get(alvo) : null;
   const cat = base ? base.cat : p.cat;
@@ -632,8 +729,11 @@ function saveForm() {
     erro('fdGenero', exige && !n.Genero ? 'Escolha o gênero.' : '');
     erro('fdFaixa', exige && !n.FaixaEtaria ? 'Escolha a faixa etária.' : '');
   } else erro('fdObs', n.Observacao ? '' : 'Escreva a anotação.');
-  const data = $('#fData').value || today(), hm = $('#fHora').value;
-  if (!/^\d{2}:\d{2}$/.test(hm)) erro('fdHora', 'Informe a hora.');
+  // auditor: a data e a hora são as do momento em que salva; outro dia ou horário vira pedido de inclusão
+  const automatico = !base && !isMaster() && !S.incl, pedirIncl = !base && !isMaster() && S.incl;
+  const data = automatico ? today() : ($('#fData').value || today()), hm = $('#fHora').value;
+  if (automatico) n.HoraRegistro = data + ' ' + nowHM() + ':' + pad(new Date().getSeconds());
+  else if (!/^\d{2}:\d{2}$/.test(hm)) erro('fdHora', 'Informe a hora.');
   else {
     // hora sem ajuste manual: usa os segundos de agora (ou os originais, na edição)
     const seg = hm === S.horaIni ? (base ? base.hora.slice(17, 19) || '00' : pad(new Date().getSeconds())) : '00';
@@ -644,7 +744,7 @@ function saveForm() {
     else erro('fdHora', '');
   }
   let motivo = '';
-  if (p.pedido) { motivo = ($('#fMot').value || '').trim(); erro('fdMot', motivo ? '' : 'Explique o motivo do pedido.'); }
+  if (p.pedido || pedirIncl) { motivo = ($('#fMot').value || '').trim(); erro('fdMot', motivo ? '' : 'Explique o motivo do pedido.'); }
   if (!ok) return;
 
   // cupom repetido na mesma loja: avisa antes de gravar
@@ -657,6 +757,14 @@ function saveForm() {
       return $('#dupBox').scrollIntoView({ block: 'center', behavior: 'smooth' });
     }
   }
+  if (pedirIncl) {
+    const novos = Object.assign({}, n); delete novos.Id;
+    const lj = lojaDoMes(data.slice(0, 7));
+    enqueue({ type: 'solic', solic: { id_solicitacao: uid(), LancamentoId: n.Id, Tipo: 'Inclusão', Novos: novos, Motivo: motivo, Loja: lj ? lj.NomeFantasia : '',
+      Proposto: dtBR(n.HoraRegistro) + ' · ' + (venda ? 'Venda · ' + money(n.Valor) + ' · ' + formaCurta(n.FormaPagamento) : cat) } });
+    toast('Pedido enviado ao master. O lançamento entra quando ele aprovar.');
+    return back();
+  }
   if (p.pedido) {
     const iguais = base.hora === n.HoraRegistro && ['tipo|Tipo', 'num|Numero', 'forma|FormaPagamento', 'valor|Valor', 'genero|Genero', 'faixa|FaixaEtaria', 'motivo|Motivo', 'obs|Observacao'].every(k => { const [a, b] = k.split('|'); return String(base[a] == null ? '' : base[a]) === String(n[b]); });
     if (iguais) return toast('Nenhum campo foi alterado.');
@@ -667,7 +775,8 @@ function saveForm() {
     enqueue({ type: 'lanc', lanc: n });
     toast(base ? 'Alteração salva.' : venda ? 'Venda de ' + money(n.Valor) + ' lançada.' : cat + ' lançada.');
   }
-  back();
+  if (outra && !base) { S.stack[S.stack.length - 1] = { v: 'form', p: { cat } }; render(); window.scrollTo(0, 0); }
+  else back();
 }
 
 /* ---------- Detalhe do lançamento ---------- */
@@ -680,6 +789,7 @@ VIEWS.lanc = p => {
   if (l.motivo) linhas.push(['Motivo', l.motivo]);
   if (l.cat !== 'Anotação') linhas.push(['Gênero', l.genero || '—'], ['Faixa etária', l.faixa || '—']);
   linhas.push(['Observação', l.obs || '—']);
+  if (isMaster() && l.recebido && Math.abs(new Date(l.recebido.replace(' ', 'T')) - new Date(l.hora.replace(' ', 'T'))) > 10 * 60e3) linhas.push(['Chegou à planilha', dtBR(l.recebido) + ' (lançado sem internet ou incluído por pedido)']);
   return {
     html: topbar({ title: l.cat, sub: l.loja, backBtn: true }) + `<main class="wrap">
       <div class="big-value gutter">${l.cat === 'Venda' ? `<span class="v num">${money(l.valor)}</span>` : `<span class="v" style="font-size:26px">${esc(lancTitulo(l))}</span>`}
@@ -690,7 +800,7 @@ VIEWS.lanc = p => {
       <dl class="dl" style="margin-top:14px">${linhas.map(([a, b]) => `<dt>${a}</dt><dd>${esc(b)}</dd>`).join('')}</dl>
       ${l._pending ? '' : isMaster() ? `<div class="section gutter two"><button class="btn" data-act="editar" data-id="${esc(l.id)}">Editar</button><button class="btn danger" data-act="excluir" data-id="${esc(l.id)}">Excluir</button></div>`
         : sp ? '' : `<div class="section gutter two"><button class="btn" data-act="pedirAlt" data-id="${esc(l.id)}">Pedir alteração</button><button class="btn danger" data-act="excluir" data-id="${esc(l.id)}">Pedir exclusão</button></div>
-          <p class="note">Lançamentos não podem ser alterados nem apagados pelo auditor. O pedido vai para o master aprovar.</p>`}
+          <p class="note">Lançamentos não podem ser alterados nem apagados pelo auditor, nem a data e a hora. O pedido vai para o master aprovar.</p>`}
     </main>`
   };
 };
@@ -756,7 +866,12 @@ VIEWS.cal = () => {
   let det = '';
   if (dia) {
     const ld = lst.filter(l => l.data === dia), r = resumo(ld);
-    det = `<div class="section gutter"><h2 class="h2">${esc(diaLongo(dia))}${ld.length ? `<button class="linkbtn" data-act="verLista" data-dia="${dia}">Ver os ${ld.length} lançamentos</button>` : ''}</h2>${kpisHtml(r)}</div>
+    const lmDia = lojaMesItem(mes), dc = declDia(dia, idLoja), js = jornAll().filter(j => j.Data === dia && (!j.IdLoja || j.IdLoja === idLoja));
+    const lojista = lmDia && lmDia.IdLoja === idLoja && dia <= hoje ? `<div class="kpis" style="margin-top:8px"><div class="kpi wide"><span class="l">Informado pelo lojista</span>
+        ${dc ? `<span class="v sm num">${money(dc.valor)}</span><span class="d ${r.total > dc.valor ? 'down' : 'up'}">${esc(difTxt(r.total, dc.valor))}</span>` : '<span class="d muted">Ainda não informado neste dia.</span>'}
+        <button class="linkbtn" style="justify-self:start" data-act="declForm" data-dia="${dia}">${dc ? (isMaster() ? 'Corrigir' : 'Ver') : 'Informar o valor'}</button></div></div>` : '';
+    det = `<div class="section gutter"><h2 class="h2">${esc(diaLongo(dia))}${ld.length ? `<button class="linkbtn" data-act="verLista" data-dia="${dia}">Ver os ${ld.length} lançamentos</button>` : ''}</h2>${kpisHtml(r)}${lojista}</div>
+      ${js.length ? `<div class="section"><h2 class="h2 gutter">Ponto dos auditores</h2><div class="list">${js.map(j => jornRowHtml(j)).join('')}</div></div>` : ''}
       <div class="section"><h2 class="h2 gutter">Por horário e forma de pagamento</h2>${matrizHtml(r.vendas, { clicavel: true })}
         ${r.vendas.length ? '<p class="note">Toque numa hora para ver os lançamentos dela.</p>' : ''}${cuponsNota(r)}</div>`;
   } else det = '<p class="note" style="padding-bottom:8px">Toque num dia para ver o resumo por horário e forma de pagamento.</p>';
@@ -790,7 +905,7 @@ VIEWS.lista = p => {
       html: head + `<main class="wrap"><div class="section gutter">${abasLista(pend)}</div>
         ${ss.length ? `<div class="list">${ss.map(s => `<button class="row" ${s._pending ? '' : `data-solic="${esc(s.id_solicitacao)}"`}><div><div class="t">${esc(s.Tipo)} · ${esc(s.Loja || '')}</div>
           <div class="s">${solicPill(s)} ${esc(dtBR(s.DataPedido))} · ${esc(s.Solicitante || '')} — ${esc(s.Tipo === 'Exclusão' ? s.Atual : s.Proposto)}</div></div><div class="v muted"></div></button>`).join('')}</div>`
-          : vazio(isMaster() ? 'Nenhum pedido de alteração.' : 'Você ainda não fez pedidos de alteração.', ICON.note)}
+          : vazio(isMaster() ? 'Nenhum pedido dos auditores.' : 'Você ainda não fez pedidos.', ICON.note)}
       </main>` + navbar('lista')
     };
   }
@@ -830,8 +945,8 @@ VIEWS.solic = p => {
     html: topbar({ title: 'Pedido de ' + s.Tipo.toLowerCase(), sub: s.Loja, backBtn: true }) + `<main class="wrap${pode ? ' form-main' : ''}">
       <div class="section gutter">${solicPill(s)}</div>
       <dl class="dl"><dt>Pedido por</dt><dd>${esc(s.Solicitante)} em ${esc(dtBR(s.DataPedido))}</dd>
-        <dt>Lançamento</dt><dd>${esc(s.Atual)}</dd>
-        ${s.Tipo === 'Alteração' ? `<dt>Mudança pedida</dt><dd>${esc(s.Proposto).replace(/; /g, '<br>')}</dd>` : '<dt>Pedido</dt><dd>Apagar o lançamento</dd>'}
+        ${s.Tipo === 'Inclusão' ? `<dt>Pedido</dt><dd>Lançar em outro dia ou horário</dd><dt>Lançamento pedido</dt><dd>${esc(s.Proposto)}</dd>` : `<dt>Lançamento</dt><dd>${esc(s.Atual)}</dd>
+        ${s.Tipo === 'Alteração' ? `<dt>Mudança pedida</dt><dd>${esc(s.Proposto).replace(/; /g, '<br>')}</dd>` : '<dt>Pedido</dt><dd>Apagar o lançamento</dd>'}`}
         <dt>Motivo</dt><dd>${esc(s.Motivo)}</dd>
         ${s.Status !== 'Pendente' ? `<dt>Resolvido por</dt><dd>${esc(s.ResolvidoPor)} em ${esc(dtBR(s.DataResolucao))}</dd><dt>Resposta</dt><dd>${esc(s.Resposta || '—')}</dd>` : ''}</dl>
       ${l ? `<div class="section gutter"><button class="btn" data-lanc="${esc(l.id)}" style="width:100%">Abrir o lançamento</button></div>` : ''}
@@ -877,21 +992,28 @@ VIEWS.painel = () => {
   const totG = gen.reduce((s, x) => s + x[1], 0), totF = fx.reduce((s, x) => s + x[1], 0);
   const semPerfil = r.vendas.filter(v => !ehOnline(v.forma) && (!v.genero || !v.faixa)).length;
   const bloco = (tit, corpo) => corpo ? `<div class="section"><h2 class="h2 gutter">${tit}</h2><div class="list">${corpo}</div></div>` : '';
+  const cd = compDias(mes, idLoja, lst), js = jornMes(mes, idLoja);
   return {
     html: head + `<main class="wrap">
       <div class="section gutter"><div class="month-nav"><button class="cal-nav" data-act="pMes" data-mes="${addMonth(mes, -1)}" aria-label="Mês anterior">${ICON.left}</button><strong>${mesNome(mes)}</strong>
         <button class="cal-nav" data-act="pMes" data-mes="${addMonth(mes, 1)}" aria-label="Próximo mês" ${mes >= hoje.slice(0, 7) ? 'disabled style="opacity:.3"' : ''}>${ICON.right}</button></div></div>
       ${ljs.length ? `<div class="chips gutter" style="padding-top:4px">${ljs.map(l => `<button class="chip" data-plj="${esc(l.IdLoja)}" aria-pressed="${l.IdLoja === idLoja}">${esc(l.NomeFantasia)}</button>`).join('')}</div>` : ''}
-      ${pend ? `<div class="section gutter"><div class="alert warn">${pend} pedido(s) de alteração aguardando você.<button data-act="verPedidos">Ver pedidos</button></div></div>` : ''}
+      ${pend ? `<div class="section gutter"><div class="alert warn">${pend} pedido(s) dos auditores aguardando você.<button data-act="verPedidos">Ver pedidos</button></div></div>` : ''}
       ${!lm && mes >= hoje.slice(0, 7) ? `<div class="section gutter"><div class="alert warn">Nenhuma loja escolhida para ${mesNome(mes)}.<button data-act="lojaMesForm" data-mes="${mes}">Escolher a loja do mês</button></div></div>` : ''}
       ${S.loadingMes === mes ? carregando() : !lst.length ? vazio(loja ? 'Nenhum lançamento de ' + loja.NomeFantasia + ' em ' + mesNome(mes) + '.' : 'Nenhum lançamento em ' + mesNome(mes) + '.') : `
       <div class="section gutter">${kpisHtml(r)}
-        <div class="kpis" style="margin-top:8px"><div class="kpi wide"><span class="l">Auditado × declarado pelo lojista</span>
-          ${decl == null ? `<span class="d muted">Faturamento declarado ainda não informado.</span><button class="linkbtn" style="justify-self:start" data-act="lojaMesForm" data-mes="${mes}">Informar o valor declarado</button>`
-            : `<span class="v sm num">${money(r.total)} × ${money(decl)}</span><span class="d ${r.total > decl ? 'down' : 'up'}">${r.total > decl ? 'Auditoria viu ' + money(r.total - decl) + ' a mais que o declarado (' + pct(r.total - decl, decl) + ')' : r.total < decl ? 'Declarado ' + money(decl - r.total) + ' acima do auditado' : 'Valores iguais'}</span>`}</div></div>
+        <div class="kpis" style="margin-top:8px"><div class="kpi wide"><span class="l">Auditado × informado pelo lojista</span>
+          ${cd.n ? `<span class="v sm num">${money(cd.aud)} × ${money(cd.dec)}</span><span class="d ${cd.aud > cd.dec ? 'down' : 'up'}">${esc(difTxt(cd.aud, cd.dec))}${cd.aud > cd.dec ? ' (' + pct(cd.aud - cd.dec, cd.dec) + ')' : ''}</span>
+              <span class="d muted">Soma dos ${cd.n} dia(s) com valor informado pelo lojista${cd.semInfo ? '. Faltam ' + cd.semInfo + ' dia(s) auditado(s)' : ''}.</span>`
+            : decl != null ? `<span class="v sm num">${money(r.total)} × ${money(decl)}</span><span class="d ${r.total > decl ? 'down' : 'up'}">${esc(difTxt(r.total, decl))}</span><span class="d muted">Valor mensal informado antes. Agora o valor é informado por dia.</span>`
+            : `<span class="d muted">Nenhum dia com venda informada pelo lojista.</span><button class="linkbtn" style="justify-self:start" data-act="declForm" data-dia="${mes === hoje.slice(0, 7) ? hoje : mes + '-01'}">Informar a venda de um dia</button>`}</div></div>
         ${cuponsNota(r, false).replace('class="note"', 'class="note" style="padding-inline:0"')}
         ${semPerfil ? `<p class="note" style="padding-inline:0">${int(semPerfil)} venda(s) presenciais sem gênero ou faixa etária (lançamentos antigos).</p>` : ''}
         <div class="two" style="margin-top:12px"><button class="btn" data-act="excel" data-mes="${mes}" data-loja="${esc(idLoja)}">${ICON.down}Baixar em Excel</button><button class="btn" data-act="irCal" data-mes="${mes}" data-loja="${esc(idLoja)}">${ICON.cal}Ver calendário</button></div></div>
+      ${bloco('Auditado × lojista, por dia', cd.dias.map(x => `<button class="row" data-act="declForm" data-dia="${x.dia}"><div><div class="t cap">${esc(DOW[new Date(x.dia + 'T12:00:00').getDay()].slice(0, 3) + ' ' + dBR(x.dia).slice(0, 5))}</div>
+          <div class="s">Auditado ${money(x.aud)} · Lojista ${x.dec == null ? 'não informou' : money(x.dec)}</div></div>
+          <div class="v num" style="font-size:14.5px;color:${x.dec == null ? 'var(--muted)' : x.aud > x.dec ? 'var(--bad)' : 'inherit'}">${x.dec == null ? '—' : (x.aud - x.dec > 0 ? '+' : x.aud - x.dec < 0 ? '−' : '') + dec(Math.abs(x.aud - x.dec))}</div></button>`).join(''))}
+      ${cd.dias.length ? '<p class="note">Diferença = auditado menos informado. Em vermelho, os dias em que a auditoria viu mais do que a loja informou. Toque num dia para informar ou corrigir.</p>' : ''}
       ${bloco('Por forma de pagamento', m.formas.map(f => hbar(f || '(sem forma)', money(m.col[f]), m.col[f] / maxF, ` <span class="muted" style="font-weight:500">${pct(m.col[f], r.total)}</span>`)).join(''))}
       ${bloco('Por horário', m.horas.map(h => hbar(pad(h) + 'h', money(m.lin[h]), m.lin[h] / maxH, ` <span class="muted" style="font-weight:500">${m.qt[h]} vendas</span>`)).join(''))}
       <div class="section"><h2 class="h2 gutter">Horário × forma de pagamento</h2>${matrizHtml(r.vendas)}</div>
@@ -899,7 +1021,70 @@ VIEWS.painel = () => {
       ${bloco('Clientes por faixa etária', fx.map(([k, n]) => hbar(k, pct(n, totF), n / totF, ` <span class="muted" style="font-weight:500">${int(n)}</span>`)).join(''))}
       ${bloco('Vendas perdidas por motivo', mot.map(([k, n]) => hbar(k, int(n), n / mot[0][1])).join(''))}
       ${bloco('Lançamentos por auditor', aud.map(([k, n]) => hbar(k, int(n), n / aud[0][1])).join(''))}`}
+      <div class="section"><h2 class="h2 gutter">Ponto dos auditores<button class="linkbtn" data-act="jornForm" data-dia="${mes === hoje.slice(0, 7) ? hoje : ''}" data-aud="">Lançar ou corrigir</button></h2>
+        ${js.length ? `<div class="list">${js.map(j => jornRowHtml(j, true)).join('')}</div><p class="note">${esc(jornResumo(js))}</p>` : '<p class="note">Nenhum ponto marcado em ' + mesNome(mes) + '.</p>'}</div>
     </main>` + navbar('painel')
+  };
+};
+
+/* Auditado × informado pelo lojista em cada dia do mês */
+function compDias(mes, idLoja, lst) {
+  const m = new Map();
+  lst.forEach(l => { const x = m.get(l.data) || { dia: l.data, aud: 0, dec: null }; if (l.cat === 'Venda') x.aud += +l.valor || 0; m.set(l.data, x); });
+  for (const [dia, d] of declMap()) if (dia.startsWith(mes) && d.idLoja === idLoja) { const x = m.get(dia) || { dia, aud: 0, dec: null }; x.dec = d.valor; m.set(dia, x); }
+  const dias = Array.from(m.values()).sort((a, b) => (a.dia < b.dia ? 1 : -1));
+  const com = dias.filter(x => x.dec != null);
+  const r2 = v => Math.round(v * 100) / 100;
+  dias.forEach(x => { x.aud = r2(x.aud); });
+  return { dias, n: com.length, semInfo: dias.length - com.length, aud: r2(com.reduce((s, x) => s + x.aud, 0)), dec: r2(com.reduce((s, x) => s + x.dec, 0)) };
+}
+const jornMes = (mes, idLoja) => jornAll().filter(j => j.Data.startsWith(mes) && (!idLoja || !j.IdLoja || j.IdLoja === idLoja)).sort((a, b) => (a.Data < b.Data ? 1 : a.Data > b.Data ? -1 : a.Auditor.localeCompare(b.Auditor)));
+function jornResumo(js) {
+  const m = new Map();
+  js.forEach(j => { const x = m.get(j.Auditor) || { d: 0, min: 0, inc: 0 }; x.d++; const t = jornTrab(j); if (t == null) x.inc++; else x.min += t; m.set(j.Auditor, x); });
+  return Array.from(m.entries()).map(([n, x]) => n + ': ' + x.d + ' dia(s), ' + minToH(x.min) + (x.inc ? ' (' + x.inc + ' sem encerramento)' : '')).join(' · ');
+}
+
+/* ---------- Venda informada pelo lojista (formulário) ---------- */
+VIEWS.declForm = p => {
+  const hoje = today(), dia = p.dia && p.dia <= hoje ? p.dia : hoje, mes = dia.slice(0, 7);
+  const loja = lojaDoMes(mes);
+  ensureMes(mes);
+  const dc = loja ? declDia(dia, loja.IdLoja) : null;
+  const r = loja ? resumo(doDia(dia, loja.IdLoja)) : resumo([]);
+  const travado = !!dc && !isMaster();
+  return {
+    form: true,
+    html: topbar({ title: 'Venda do lojista', sub: loja ? loja.NomeFantasia : '', backBtn: true }) + `<main class="wrap form-main"><div class="fields gutter">
+      <div class="field"><label for="dData">Dia</label><input class="input" id="dData" type="date" value="${dia}" max="${hoje}"></div>
+      ${!loja ? `<div class="alert warn">Não há loja auditada em ${mesNome(mes)}.</div>` : `
+      <div class="field" id="fdDecl"><label for="dValor">Total de vendas informado pelo lojista em ${dBR(dia).slice(0, 5)}${isMaster() ? '' : '<span class="req"> *</span>'}</label>
+        <input class="input money num" id="dValor" inputmode="numeric" autocomplete="off" placeholder="R$ 0,00" value="${dc ? money(dc.valor) : ''}" ${travado ? 'disabled' : ''}>
+        <div class="hint">${travado ? 'Informado por ' + esc(dc.por || 'outro usuário') + '. Depois de informado, só o master corrige.' : isMaster() && dc ? 'Informado por ' + esc(dc.por || '') + '. Apague o valor para remover.' : 'O valor que a loja declarou ter vendido no dia inteiro.'}</div></div>
+      <div class="card" style="padding:14px;display:grid;gap:4px"><span class="muted" style="font-size:13px">Auditoria neste dia</span><b class="num" style="font-size:20px">${money(r.total)}</b>
+        <span class="muted" style="font-size:13.5px">${int(r.n)} venda${r.n === 1 ? '' : 's'} lançada${r.n === 1 ? '' : 's'}${dc ? ' · ' + esc(difTxt(r.total, dc.valor)) : ''}</span></div>`}
+      <div id="dErr"></div></div></main>
+    <div class="formbar"><button class="btn" data-act="back">${travado || !loja ? 'Voltar' : 'Cancelar'}</button>${travado || !loja ? '<span></span>' : `<button class="btn primary" data-act="saveDecl" data-dia="${dia}">Salvar</button>`}</div>`
+  };
+};
+
+/* ---------- Ponto: lançar ou corrigir (master) ---------- */
+VIEWS.jornForm = p => {
+  const hoje = today();
+  const j = p.aud ? jornAll().find(x => x.Data === p.dia && x.IdAuditor === p.aud) || {} : {};
+  const auds = ((S.data && S.data.auditores) || []).slice().sort((a, b) => a.nome.localeCompare(b.nome));
+  const campo = (id, rot, v) => `<div class="field"><label for="${id}">${rot}</label><input class="input" id="${id}" type="time" value="${esc(v || '')}"></div>`;
+  return {
+    form: true,
+    html: topbar({ title: p.aud ? 'Corrigir ponto' : 'Lançar ponto', sub: p.aud ? (j.Auditor || '') + ' · ' + dBR(p.dia) : '', backBtn: true }) + `<main class="wrap form-main"><div class="fields gutter">
+      ${p.aud ? '' : `<div class="field" id="fdJAud"><label for="jAud">Auditor<span class="req"> *</span></label><select id="jAud"><option value="">Escolha…</option>${auds.map(a => `<option value="${esc(a.id)}">${esc(a.nome)}</option>`).join('')}</select></div>
+      <div class="field"><label for="jData">Dia</label><input class="input" id="jData" type="date" value="${p.dia || hoje}" max="${hoje}"></div>
+      <div class="alert warn">Se a pessoa já tem ponto nesse dia, os horários abaixo substituem os marcados.</div>`}
+      <div class="two">${campo('jChegada', 'Chegada na loja', j.Chegada)}${campo('jEncerramento', 'Encerramento', j.Encerramento)}</div>
+      <div class="two">${campo('jSaidaIntervalo', 'Saída para o intervalo', j.SaidaIntervalo)}${campo('jVoltaIntervalo', 'Volta do intervalo', j.VoltaIntervalo)}</div>
+      <p class="note" style="padding-inline:0">Deixe em branco o que não aconteceu. A correção fica registrada no histórico.</p>
+      <div id="jErr"></div></div></main>
+    <div class="formbar"><button class="btn" data-act="back">Cancelar</button><button class="btn primary" data-act="saveJorn" data-dia="${p.aud ? p.dia : ''}" data-aud="${esc(p.aud || '')}">Salvar</button></div>`
   };
 };
 
@@ -923,12 +1108,19 @@ async function baixarExcel(mes, idLoja) {
     const r2 = v => (typeof v === 'number' ? Math.round(v * 100) / 100 : v);
     const w2 = X.utils.aoa_to_sheet(a2.map(l => l.map(r2))); w2['!cols'] = a2[0].map(() => ({ wch: 16 }));
     X.utils.book_append_sheet(wb, w2, 'Hora x pagamento');
-    const dias = Array.from(new Set(lst.map(l => l.data))).sort();
-    const a3 = [['Data', 'Dia', 'Vendas (R$)', 'Qtd de vendas', 'CF / NF (R$)', 'Sem documento (R$)', 'Qtd sem documento', 'Visitas', 'Vendas perdidas', 'Cupons pulados']]
-      .concat(dias.map(d => { const x = resumo(lst.filter(l => l.data === d)); return [dBR(d), DOW[new Date(d + 'T12:00:00').getDay()], x.total, x.n, x.cfV, x.sdV, x.sdN, x.visitas, x.perdidas, x.pulados]; }))
-      .concat([['Total', '', r.total, r.n, r.cfV, r.sdV, r.sdN, r.visitas, r.perdidas, r.pulados]]);
-    const w3 = X.utils.aoa_to_sheet(a3.map(l => l.map(r2))); w3['!cols'] = a3[0].map(() => ({ wch: 17 }));
+    const cd = compDias(mes, idLoja, lst), decDe = {}; cd.dias.forEach(x => { decDe[x.dia] = x.dec; });
+    const dias = cd.dias.map(x => x.dia).sort();
+    const a3 = [['Data', 'Dia', 'Vendas auditadas (R$)', 'Informado pelo lojista (R$)', 'Diferença (R$)', 'Qtd de vendas', 'CF / NF (R$)', 'Sem documento (R$)', 'Qtd sem documento', 'Visitas', 'Vendas perdidas', 'Cupons pulados']]
+      .concat(dias.map(d => { const x = resumo(lst.filter(l => l.data === d)), dc = decDe[d]; return [dBR(d), DOW[new Date(d + 'T12:00:00').getDay()], x.total, dc == null ? null : dc, dc == null ? null : x.total - dc, x.n, x.cfV, x.sdV, x.sdN, x.visitas, x.perdidas, x.pulados]; }))
+      .concat([['Total', '', r.total, cd.n ? cd.dec : null, cd.n ? cd.aud - cd.dec : null, r.n, r.cfV, r.sdV, r.sdN, r.visitas, r.perdidas, r.pulados]]);
+    if (cd.n) a3.push([], ['A diferença do total considera só os ' + cd.n + ' dia(s) com valor informado pelo lojista (auditado nesses dias: ' + dec(cd.aud) + ').']);
+    const w3 = X.utils.aoa_to_sheet(a3.map(l => l.map(r2))); w3['!cols'] = a3[0].map(() => ({ wch: 19 }));
     X.utils.book_append_sheet(wb, w3, 'Por dia');
+    const js = jornMes(mes, idLoja).slice().reverse();
+    const a4 = [['Data', 'Dia', 'Auditor', 'Chegada', 'Saída para o intervalo', 'Volta do intervalo', 'Encerramento', 'Horas trabalhadas']]
+      .concat(js.map(j => { const t = jornTrab(j); return [dBR(j.Data), DOW[new Date(j.Data + 'T12:00:00').getDay()], j.Auditor, j.Chegada, j.SaidaIntervalo, j.VoltaIntervalo, j.Encerramento, t == null ? '' : minToH(t)]; }));
+    const w4 = X.utils.aoa_to_sheet(a4); w4['!cols'] = [10, 10, 20, 10, 20, 17, 13, 16].map(wch => ({ wch }));
+    X.utils.book_append_sheet(wb, w4, 'Ponto');
     X.writeFile(wb, 'Auditoria ' + loja.NomeFantasia.replace(/[\\/:*?"<>|]/g, '') + ' ' + mes + '.xlsx');
   } catch (e) { toast(e.message); }
 }
@@ -939,7 +1131,10 @@ VIEWS.conta = () => {
   const tema = temaAtual();
   const fila = S.queue;
   const itemFila = q => {
-    const t = q.type === 'lanc' ? (q.lanc.Categoria === 'Venda' ? 'Venda de ' + money(q.lanc.Valor) : q.lanc.Categoria) + ' · ' + dtBR(q.lanc.HoraRegistro) : 'Pedido de ' + q.solic.Tipo.toLowerCase();
+    const t = q.type === 'lanc' ? (q.lanc.Categoria === 'Venda' ? 'Venda de ' + money(q.lanc.Valor) : q.lanc.Categoria) + ' · ' + dtBR(q.lanc.HoraRegistro)
+      : q.type === 'decl' ? 'Venda do lojista em ' + dBR(q.decl.Data) + (q.decl.Valor === '' ? ' (remover)' : ' · ' + money(q.decl.Valor))
+      : q.type === 'ponto' ? 'Ponto: ' + JEV_NOME[q.ponto.Evento] + ' · ' + dtBR(q.ponto.Hora)
+      : 'Pedido de ' + q.solic.Tipo.toLowerCase();
     return `<div class="row"><div><div class="t">${esc(t)}</div><div class="s">${q.error ? '<span class="pill bad">Não aceito</span> ' + esc(q.error) : 'Aguardando envio'}</div></div>
       <div class="v" style="display:grid;gap:6px">${q.error ? `<button class="quick" data-act="retry" data-qid="${q.qid}">Tentar de novo</button>` : ''}<button class="quick" style="color:var(--bad)" data-act="descartar" data-qid="${q.qid}">Descartar</button></div></div>`;
   };
@@ -972,7 +1167,7 @@ VIEWS.lojaMes = () => {
   const hoje = today().slice(0, 7);
   const ms = []; for (let i = 1; i >= -14; i--) ms.push(addMonth(hoje, i));
   return {
-    html: topbar({ title: 'Loja do mês', sub: 'Uma loja auditada por mês', backBtn: true }) + `<main class="wrap"><p class="note">O auditor lança sempre na loja escolhida para o mês. Toque num mês para escolher a loja e informar o faturamento declarado pelo lojista.</p>
+    html: topbar({ title: 'Loja do mês', sub: 'Uma loja auditada por mês', backBtn: true }) + `<main class="wrap"><p class="note">O auditor lança sempre na loja escolhida para o mês. Toque num mês para escolher a loja. A venda informada pelo lojista agora é lançada por dia, na tela Lançar ou no Calendário.</p>
       <div class="list" style="margin-top:12px">${ms.map(m => { const x = lojaMesItem(m); return `<button class="row" data-act="lojaMesForm" data-mes="${m}"><div><div class="t cap">${mesNome(m)}${m === hoje ? ' <span class="pill">mês atual</span>' : ''}</div>
         <div class="s">${x ? esc((lojaById(x.IdLoja) || {}).NomeFantasia || x.Loja) + (x.Declarado !== '' ? ' · declarado ' + money(x.Declarado) : '') : (m >= hoje ? '<span class="pill warn">Escolher</span>' : 'Sem auditoria')}</div></div><div class="v muted">${ICON.right.replace('<svg', '<svg style="width:18px;height:18px"')}</div></button>`; }).join('')}</div></main>`
   };
@@ -985,8 +1180,6 @@ VIEWS.lojaMesForm = p => {
     html: topbar({ title: 'Loja de ' + mesNome(p.mes), backBtn: true }) + `<main class="wrap form-main"><div class="fields gutter">
       <div class="field" id="fdLoja"><label for="mLoja">Loja auditada<span class="req"> *</span></label><select id="mLoja"><option value="">Escolha a loja…</option>${ativas.map(l => `<option value="${esc(l.IdLoja)}" ${l.IdLoja === x.IdLoja ? 'selected' : ''}>${esc(l.NomeFantasia)}</option>`).join('')}</select>
         <div class="hint">Não encontrou? Cadastre em Conta &gt; Lojas.</div></div>
-      <div class="field"><label for="mDecl">Faturamento declarado pelo lojista no mês</label><input class="input money num" id="mDecl" inputmode="numeric" placeholder="R$ 0,00" value="${x.Declarado !== '' && x.Declarado != null ? money(x.Declarado) : ''}">
-        <div class="hint">Opcional. Com ele o Painel compara o que a auditoria viu com o que a loja declarou.</div></div>
       <div id="mErr"></div></div></main>
     <div class="formbar"><button class="btn" data-act="back">Cancelar</button><button class="btn primary" data-act="saveLojaMes" data-mes="${p.mes}">Salvar</button></div>`
   };
@@ -1173,7 +1366,40 @@ const ACOES = {
   back: () => back(),
   sync: () => sync({ full: true, quiet: false, forcar: true }),
   doUpdate: () => doUpdate(),
-  saveForm: () => saveForm(),
+  saveForm: () => saveForm(false),
+  saveNova: () => saveForm(true),
+  outroHorario: () => {
+    S.incl = true;
+    $('#fdAgora').hidden = true; $('#fdHora').hidden = false; $('#fdMot').hidden = false;
+    $('#btSalvar').textContent = 'Enviar pedido';
+    const b = $('#btNova'); if (b) { b.textContent = 'Cancelar'; b.dataset.act = 'back'; }
+    $('#fdHora').scrollIntoView({ block: 'center', behavior: 'smooth' });
+  },
+  ponto: d => {
+    if (d.ev === 'Encerramento' && S.confirmEnc !== true) { S.confirmEnc = true; toast('Toque em Encerrar o dia de novo para confirmar. Depois disso só o master corrige.'); setTimeout(() => { S.confirmEnc = false; }, 5000); return; }
+    S.confirmEnc = false;
+    enqueue({ type: 'ponto', ponto: { Evento: d.ev, Hora: today() + ' ' + nowHM() + ':' + pad(new Date().getSeconds()) } });
+    toast(JEV_NOME[d.ev] + ' marcada às ' + nowHM() + '.');
+    render();
+  },
+  declForm: d => go('declForm', { dia: d.dia }),
+  saveDecl: d => {
+    const v = parseMoney($('#dValor').value);
+    const lj = lojaDoMes(d.dia.slice(0, 7)), atual = lj ? declDia(d.dia, lj.IdLoja) : null;
+    if (v == null && !(isMaster() && atual)) return fieldErr('fdDecl', 'Informe o valor.');
+    if (atual && v === atual.valor) return back();
+    enqueue({ type: 'decl', decl: { Data: d.dia, Valor: v == null ? '' : v } });
+    toast(v == null ? 'Valor removido.' : 'Venda do lojista em ' + dBR(d.dia).slice(0, 5) + ': ' + money(v) + '.');
+    back();
+  },
+  jornForm: d => go('jornForm', { dia: d.dia || today(), aud: d.aud || '' }),
+  saveJorn: d => {
+    const idAud = d.aud || $('#jAud').value, dia = d.dia || $('#jData').value;
+    if (!idAud) return fieldErr('fdJAud', 'Escolha o auditor.');
+    const jornada = { Data: dia, IdAuditor: idAud };
+    JEV.forEach(e => { jornada[e] = $('#j' + e).value || ''; });
+    adminSave('[data-act="saveJorn"]', '#jErr', async () => { const r = await api('salvarJornada', { jornada }); S.data.jornadas = r.jornadas; S.data.jornCols = r.cols; S.ver++; }, 'Ponto salvo.');
+  },
   dupOk: () => { S.dupOk = true; saveForm(); },
   verDia: d => { S.ui.calMes = d.dia.slice(0, 7); S.ui.calDia = d.dia; S.ui.calLoja = ''; tab('cal'); },
   verLista: d => go('lista', { dia: d.dia, loja: calEstado().idLoja }),
@@ -1206,8 +1432,7 @@ const ACOES = {
   saveLojaMes: d => {
     const idLoja = $('#mLoja').value;
     if (!idLoja) return fieldErr('fdLoja', 'Escolha a loja.');
-    const decl = parseMoney($('#mDecl').value);
-    adminSave('[data-act="saveLojaMes"]', '#mErr', async () => { const r = await api('salvarLojaMes', { item: { Mes: d.mes, IdLoja: idLoja, Declarado: decl == null ? '' : decl } }); S.data.lojaMes = r.lojaMes; S.ver++; }, 'Loja do mês salva.');
+    adminSave('[data-act="saveLojaMes"]', '#mErr', async () => { const r = await api('salvarLojaMes', { item: { Mes: d.mes, IdLoja: idLoja } }); S.data.lojaMes = r.lojaMes; S.ver++; }, 'Loja do mês salva.');
   },
   lojas: () => go('lojas'),
   novaLoja: () => go('lojaForm', {}),
@@ -1279,12 +1504,13 @@ document.addEventListener('keydown', e => {
 document.addEventListener('input', e => {
   const el = e.target, id = el.id;
   const fd = el.closest && el.closest('.field.invalid'); if (fd) fieldErr(fd.id, '');
-  if (id === 'fValor' || id === 'mDecl') { const v = parseMoney(el.value); el.value = v == null ? '' : money(v); }   // digita os centavos, como em maquininha
+  if (id === 'fValor' || id === 'dValor') { const v = parseMoney(el.value); el.value = v == null ? '' : money(v); }   // digita os centavos, como em maquininha
   if (id === 'fNum') { const c = el.value.replace(/\D/g, '').slice(0, 12); if (c !== el.value) el.value = c; S.dupOk = false; const db = $('#dupBox'); if (db) db.innerHTML = ''; }
   if (id === 'busca') { S.ui.busca = el.value; clearTimeout(S.buscaT); S.buscaT = setTimeout(render, 180); }
 });
 document.addEventListener('change', e => {
   if (e.target.id === 'listaDia') { S.ui.listaDia = e.target.value && e.target.value !== today() ? e.target.value : ''; render(); }
+  if (e.target.id === 'dData' && e.target.value) { cur().p.dia = e.target.value; render(); }
 });
 
 window.addEventListener('online', () => { updateChrome(); sync({ full: true }); });
