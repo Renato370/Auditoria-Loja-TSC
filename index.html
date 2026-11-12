@@ -345,14 +345,18 @@ select.chip { appearance: none; padding-right: 26px; background-image: url("data
 .menu:active { background: var(--surface-2); }
 .linkbtn { border: 0; background: none; color: var(--brand); font: inherit; font-weight: 700; padding: 0; text-decoration: underline; cursor: pointer; text-transform: none; letter-spacing: 0; font-size: 13px; }
 .cat.wide small { display: block; margin-top: 2px; }
+.who-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid color-mix(in srgb, currentColor 35%, transparent); background: transparent; color: inherit; border-radius: 999px; padding: 3px 10px 3px 3px; font-weight: 700; font-size: 13px; max-width: 120px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
+.who-chip span { width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, currentColor 22%, transparent); display: grid; place-items: center; font-size: 10.5px; flex: none; }
 .ponto { padding: 14px; display: grid; gap: 10px; }
 .ponto-h { display: flex; align-items: center; gap: 8px; font-size: 15.5px; }
 .ponto-h svg { width: 20px; height: 20px; color: var(--brand); }
 .ponto-h .pill { margin-left: auto; }
-.ponto-m { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
-.ponto-m span { display: grid; gap: 2px; }
-.ponto-m small { font-size: 11.5px; color: var(--muted); line-height: 1.2; }
-.ponto-m b { font-size: 17px; }
+.ponto-l { display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; font-size: 14.5px; }
+.ponto-l span { color: var(--muted); }
+.ponto-mot { display: grid; gap: 8px; }
+.saida-l { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 6px; margin-bottom: 6px; align-items: center; }
+.saida-l select, .saida-l .input { min-width: 0; width: 100%; padding-inline: 8px; font-size: 15px; }
+.saida-h { font-size: 12.5px; color: var(--muted); margin-bottom: 2px; }
 .ponto-b { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 8px; }
 .ponto-b .btn { min-height: 48px; }
 .agora { display: flex; align-items: center; gap: 10px; border: 1.5px dashed var(--line); border-radius: 12px; padding: 10px 12px; }

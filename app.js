@@ -3,8 +3,8 @@
 'use strict';
 
 const CFG = window.APP_CONFIG || {};
-const APP_VERSION = '1.1.0';
-const MIN_SERVER = '1.1.0';
+const APP_VERSION = '1.2.0';
+const MIN_SERVER = '1.2.0';
 
 /* ============================ Utilidades ============================ */
 const $ = (s, r = document) => r.querySelector(s);
@@ -115,7 +115,8 @@ const LISTAS_PADRAO = {
   formas: ['Cartão de crédito', 'Cartão de débito', 'Pix', 'Dinheiro', 'Retirada de mercadoria', 'Troco não devolvido', 'A prazo', 'Troca zerada', 'Online'],
   motivos: ['Preço', 'Cor', 'Tamanho', 'Falta de Produto', 'Atendimento'],
   faixas: ['18/29', '30/39', '40/49', '50/60+'],
-  generos: ['Masculino', 'Feminino']
+  generos: ['Masculino', 'Feminino'],
+  saidas: ['Intervalo', 'Banheiro', 'Coleta em outras lojas', 'Outro']
 };
 const FORMA_CURTA = { 'Cartão de crédito': 'Crédito', 'Cartão de débito': 'Débito', 'Retirada de mercadoria': 'Retirada', 'Troco não devolvido': 'Troco', 'Troca zerada': 'Troca' };
 const FORMA_BOTAO = { 'Cartão de crédito': 'Crédito', 'Cartão de débito': 'Débito', 'Retirada de mercadoria': 'Retirada' };   // rótulos dos botões do formulário
@@ -238,64 +239,74 @@ function declMap() {
   return m;
 }
 const declDia = (dia, idLoja) => { const x = declMap().get(dia); return x && (!idLoja || x.idLoja === idLoja) ? x : null; };
+const difCor = (aud, decl) => { const d = Math.round((aud - decl) * 100); return d > 0 ? 'var(--bad)' : d < 0 ? 'var(--warn)' : 'var(--muted)'; };
+const difSpan = (aud, decl, extra = '') => `<span class="d" style="color:${difCor(aud, decl)}">${esc(difTxt(aud, decl))}${extra}</span>`;
 function difTxt(aud, decl) {
   const d = Math.round((aud - decl) * 100) / 100;
   return d === 0 ? 'Valores iguais' : d > 0 ? 'Auditoria viu ' + money(d) + ' a mais que o informado' : 'Lojista informou ' + money(-d) + ' a mais que o auditado';
 }
 
-/* ---------- Ponto do auditor ---------- */
-const JEV = ['Chegada', 'SaidaIntervalo', 'VoltaIntervalo', 'Encerramento'];
-const JEV_NOME = { Chegada: 'Chegada na loja', SaidaIntervalo: 'Saída para o intervalo', VoltaIntervalo: 'Volta do intervalo', Encerramento: 'Encerramento do dia' };
+/* ---------- Ponto do auditor: chegada, saídas da loja (quantas forem) e encerramento ---------- */
+const JEV_NOME = { Chegada: 'Chegada na loja', Saida: 'Saída da loja', Volta: 'Volta para a loja', Encerramento: 'Encerramento do dia' };
 function jornAll() {
-  const cols = (S.data && S.data.jornCols) || [];
-  const list = ((S.data && S.data.jornadas) || []).map(r => { const o = {}; cols.forEach((c, i) => { o[c] = r[i]; }); return o; });
+  const list = ((S.data && S.data.jornadas) || []).filter(x => x && !Array.isArray(x)).map(x => Object.assign({}, x, { Saidas: (x.Saidas || []).map(s => Object.assign({}, s)) }));
   S.queue.forEach(q => {
     if (q.type !== 'ponto' || !S.user || (q.uid && q.uid !== S.user.id)) return;
-    const d = q.ponto.Hora.slice(0, 10);
+    const d = q.ponto.Hora.slice(0, 10), hm = q.ponto.Hora.slice(11, 16), ev = q.ponto.Evento;
     let o = list.find(x => x.Data === d && x.IdAuditor === S.user.id);
-    if (!o) { const lj = lojaDoMes(d.slice(0, 7)); o = { Data: d, IdAuditor: S.user.id, Auditor: S.user.nome, IdLoja: lj ? lj.IdLoja : '', Loja: lj ? lj.NomeFantasia : '', Chegada: '', SaidaIntervalo: '', VoltaIntervalo: '', Encerramento: '' }; list.push(o); }
+    if (!o) { const lj = lojaDoMes(d.slice(0, 7)); o = { Data: d, IdAuditor: S.user.id, Auditor: S.user.nome, IdLoja: lj ? lj.IdLoja : '', Loja: lj ? lj.NomeFantasia : '', Chegada: '', Encerramento: '', Saidas: [] }; list.push(o); }
     if (q.error) { o._error = q.error; return; }
-    if (!o[q.ponto.Evento]) o[q.ponto.Evento] = q.ponto.Hora.slice(11, 16);
+    if (ev === 'Chegada' || ev === 'Encerramento') { if (!o[ev]) o[ev] = hm; }
+    else if (ev === 'Saida') { if (!o.Saidas.some(s => s.Id === q.ponto.Id)) o.Saidas.push({ Id: q.ponto.Id, Motivo: q.ponto.Motivo, Saida: hm, Volta: '' }); }
+    else if (ev === 'Volta') { const a = o.Saidas.find(s => !s.Volta); if (a) a.Volta = hm; }
     o._pending = true;
   });
   return list;
 }
 const hmMin = s => +s.slice(0, 2) * 60 + +s.slice(3, 5);
 const minToH = m => Math.floor(m / 60) + 'h' + pad(m % 60);
+const jornAberta = j => (j.Saidas || []).find(s => !s.Volta) || null;
+const jornFora = j => (j.Saidas || []).reduce((t, s) => t + (s.Volta ? Math.max(0, hmMin(s.Volta) - hmMin(s.Saida)) : 0), 0);
+/* Minutos dentro da loja: do início ao encerramento, menos o tempo das saídas */
 function jornTrab(j) {
   if (!j.Chegada || !j.Encerramento) return null;
-  let m = hmMin(j.Encerramento) - hmMin(j.Chegada);
-  if (j.SaidaIntervalo && j.VoltaIntervalo) m -= hmMin(j.VoltaIntervalo) - hmMin(j.SaidaIntervalo);
-  return Math.max(0, m);
+  return Math.max(0, hmMin(j.Encerramento) - hmMin(j.Chegada) - jornFora(j));
 }
+const saidasTxt = j => (j.Saidas || []).map(s => s.Saida + ' às ' + (s.Volta || '…') + ' ' + s.Motivo).join(', ');
 function jornTexto(j) {
-  const p = [];
-  p.push(j.Chegada ? j.Chegada + (j.Encerramento ? ' às ' + j.Encerramento : j.Data < today() ? ' (sem encerramento)' : ' (em andamento)') : 'sem chegada');
-  if (j.SaidaIntervalo) p.push('intervalo ' + j.SaidaIntervalo + (j.VoltaIntervalo ? ' às ' + j.VoltaIntervalo : ' (sem volta)'));
-  const t = jornTrab(j); if (t != null) p.push(minToH(t) + ' trabalhadas');
+  const p = [], n = (j.Saidas || []).length, ab = jornAberta(j);
+  p.push(j.Chegada ? j.Chegada + (j.Encerramento ? ' às ' + j.Encerramento : j.Data < today() ? ' (sem encerramento)' : ab ? ' (fora da loja desde ' + ab.Saida + ')' : ' (em andamento)') : 'sem chegada');
+  if (n) p.push(n + ' saída' + (n === 1 ? '' : 's') + ' · ' + minToH(jornFora(j)) + ' fora');
+  const t = jornTrab(j); if (t != null) p.push(minToH(t) + ' na loja');
   return p.join(' · ');
 }
 function jornRowHtml(j, comData) {
   const m = isMaster() && !j._pending;
   const tags = j._error ? '<span class="pill bad">Não aceito</span> ' : j._pending ? '<span class="pill mut">Na fila</span> ' : '';
   return `<${m ? 'button' : 'div'} class="row" ${m ? `data-act="jornForm" data-dia="${j.Data}" data-aud="${esc(j.IdAuditor)}"` : ''}><div><div class="t cap">${comData ? esc(DOW[new Date(j.Data + 'T12:00:00').getDay()].slice(0, 3) + ' ' + dBR(j.Data).slice(0, 5)) + ' · ' : ''}${esc(j.Auditor)}</div>
-    <div class="s">${tags}${esc(jornTexto(j))}</div></div><div class="v muted">${m ? ICON.right.replace('<svg', '<svg style="width:18px;height:18px"') : ''}</div></${m ? 'button' : 'div'}>`;
+    <div class="s" style="-webkit-line-clamp:6">${tags}${esc(jornTexto(j))}${(j.Saidas || []).length ? '<br>Saídas: ' + esc(saidasTxt(j)) : ''}</div></div><div class="v muted">${m ? ICON.right.replace('<svg', '<svg style="width:18px;height:18px"') : ''}</div></${m ? 'button' : 'div'}>`;
 }
 function pontoHtml() {
   const hoje = today();
-  const j = jornAll().find(x => x.Data === hoje && x.IdAuditor === S.user.id) || {};
-  const marc = [['Chegada', 'Chegada'], ['SaidaIntervalo', 'Saiu p/ intervalo'], ['VoltaIntervalo', 'Voltou'], ['Encerramento', 'Encerrou']].filter(([k]) => j[k]).map(([k, t]) => `<span><small>${t}</small><b class="num">${j[k]}</b></span>`).join('');
+  const j = jornAll().find(x => x.Data === hoje && x.IdAuditor === S.user.id) || { Saidas: [] };
+  const ab = jornAberta(j);
   const bt = (ev, t, pri) => `<button class="btn${pri ? ' primary' : ''}" data-act="ponto" data-ev="${ev}">${t}</button>`;
-  let bts = '';
-  if (!j.Chegada) bts = bt('Chegada', 'Cheguei na loja', true);
-  else if (j.Encerramento) bts = '';
-  else if (j.SaidaIntervalo && !j.VoltaIntervalo) bts = bt('VoltaIntervalo', 'Voltei do intervalo', true);
-  else bts = (j.SaidaIntervalo ? '' : bt('SaidaIntervalo', 'Sair para o intervalo')) + bt('Encerramento', 'Encerrar o dia');
-  return `<div class="section gutter"><div class="card ponto"><div class="ponto-h">${ICON.clock}<b>Seu ponto hoje</b>${j._error ? '<span class="pill bad">Não aceito</span>' : j._pending ? '<span class="pill mut">Na fila</span>' : ''}</div>
+  let acoes = '';
+  if (!j.Chegada) acoes = `<div class="ponto-b">${bt('Chegada', 'Cheguei na loja', true)}</div>`;
+  else if (j.Encerramento) acoes = '';
+  else if (ab) acoes = `<div class="ponto-b">${bt('Volta', 'Voltei para a loja', true)}</div>`;
+  else if (S.ui.pontoSair) acoes = `<div class="ponto-mot"><span class="muted">Por que você está saindo?</span><div class="opts">${lista('saidas').map(m => `<button type="button" data-act="ponto" data-ev="Saida" data-motivo="${esc(m)}">${esc(m)}</button>`).join('')}</div>
+      <button class="linkbtn" style="justify-self:start" data-act="pontoSair" data-on="0">Cancelar</button></div>`;
+  else acoes = `<div class="ponto-b"><button class="btn" data-act="pontoSair" data-on="1">Sair da loja</button>${bt('Encerramento', 'Encerrar o dia')}</div>`;
+  const linhas = [];
+  if (j.Chegada) linhas.push(['Chegada', j.Chegada]);
+  j.Saidas.forEach(s => linhas.push([s.Motivo, s.Saida + (s.Volta ? ' às ' + s.Volta : ' · fora da loja')]));
+  if (j.Encerramento) linhas.push(['Encerrou', j.Encerramento]);
+  return `<div class="section gutter"><div class="card ponto"><div class="ponto-h">${ICON.clock}<b>Seu ponto hoje</b>${j._error ? '<span class="pill bad">Não aceito</span>' : j._pending ? '<span class="pill mut">Na fila</span>' : ab ? '<span class="pill warn">Fora da loja</span>' : ''}</div>
     ${j._error ? `<div class="muted">${esc(j._error)}</div>` : ''}
-    ${marc ? `<div class="ponto-m">${marc}</div>` : '<div class="muted">Toque ao entrar na loja. A hora é registrada na hora do toque.</div>'}
-    ${j.Encerramento ? `<div class="muted">Dia encerrado${jornTrab(j) != null ? ' · ' + minToH(jornTrab(j)) + ' trabalhadas' : ''}.</div>` : ''}
-    ${bts ? `<div class="ponto-b">${bts}</div>` : ''}</div></div>`;
+    ${linhas.length ? `<div class="ponto-l">${linhas.map(([a, b]) => `<span>${esc(a)}</span><b class="num">${esc(b)}</b>`).join('')}</div>` : '<div class="muted">Toque ao entrar na loja. A hora é registrada na hora do toque.</div>'}
+    ${j.Encerramento ? `<div class="muted">Dia encerrado${jornTrab(j) != null ? ' · ' + minToH(jornTrab(j)) + ' na loja' : ''}.</div>` : ''}
+    ${acoes}</div></div>`;
 }
 
 /* Lojas que aparecem num mês (a do mês + as que têm lançamentos) */
@@ -372,16 +383,15 @@ async function pushItem(item) {
     if (S.data && r.declarados) { S.data.declarados = r.declarados; S.ver++; }
   } else if (item.type === 'ponto') {
     const r = await api('marcarPonto', { ponto: item.ponto });
-    if (r.jornada) guardarJorn(r.cols, r.jornada);
+    if (r.jornada) guardarJorn(r.jornada);
   }
 }
-function guardarJorn(cols, row) {
+function guardarJorn(j) {
   if (!S.data) return;
-  S.data.jornCols = cols;
-  const iD = cols.indexOf('Data'), iA = cols.indexOf('IdAuditor');
-  S.data.jornadas = (S.data.jornadas || []).filter(x => !(x[iD] === row[iD] && x[iA] === row[iA])).concat([row]);
+  S.data.jornadas = (S.data.jornadas || []).filter(x => x && !Array.isArray(x) && !(x.Data === j.Data && x.IdAuditor === j.IdAuditor)).concat([j]);
   S.ver++;
 }
+
 function guardarLanc(l) {
   const novo = !S.lmap.has(l.id);
   S.lmap.set(l.id, l);
@@ -524,12 +534,13 @@ function topbar({ title, sub = '', backBtn = false, actions = '' }) {
       ${backBtn ? `<button class="icon-btn" data-act="back" aria-label="Voltar">${ICON.back}</button>` : `<span class="hdr-logo">${SELO('currentColor', 5)}</span>`}
       <h1>${esc(title)}${sub ? `<span class="sub">${esc(sub)}</span>` : ''}</h1>
       ${actions}
+      ${!backBtn && S.user ? `<button class="who-chip" data-tab="conta" aria-label="Conta de ${esc(S.user.nome)}"><span>${esc(initials(S.user.nome))}</span>${esc(S.user.nome.split(' ')[0])}</button>` : ''}
       <button class="icon-btn${S.syncing ? ' spin' : ''}" data-act="sync" id="syncBtn" aria-label="Sincronizar" title="${off ? 'Sem internet' : 'Sincronizar'}">${off ? ICON.cloudOff : ICON.sync}${pend ? `<span class="sync-dot">${pend}</span>` : ''}</button>
     </div></div></header>`;
 }
 function navbar(active) {
   const pendM = isMaster() ? solicAll().filter(s => s.Status === 'Pendente').length : 0;
-  const it = [['inicio', 'Lançar', ICON.plus], ['cal', 'Calendário', ICON.cal], ['lista', 'Lançamentos', ICON.list]].concat(isMaster() ? [['painel', 'Painel', ICON.chart]] : []).concat([['conta', 'Conta', ICON.user]]);
+  const it = [['inicio', 'Lançar', ICON.plus], ['cal', 'Calendário', ICON.cal], ['lista', 'Lançamentos', ICON.list]].concat(isMaster() ? [['painel', 'Painel', ICON.chart]] : []).concat([['conta', S.user ? S.user.nome.split(' ')[0] : 'Conta', ICON.user]]);
   return `<nav class="nav" style="grid-template-columns:repeat(${it.length},1fr)">${it.map(([k, l, i]) => `<button data-tab="${k}" ${active === k ? 'aria-current="page"' : ''}>${i}<span>${l}</span>${k === 'lista' && pendM ? `<b class="nbadge" aria-label="${pendM} pedidos pendentes">${pendM}</b>` : ''}</button>`).join('')}</nav>`;
 }
 const vazio = (msg, icon = ICON.receipt) => `<div class="empty">${icon}<div>${esc(msg)}</div></div>`;
@@ -603,7 +614,7 @@ VIEWS.login = () => {
 /* ---------- Lançar (início) ---------- */
 VIEWS.inicio = () => {
   const hoje = today(), mes = hoje.slice(0, 7), loja = lojaDoMes(mes);
-  const head = topbar({ title: loja ? loja.NomeFantasia : 'Auditoria em Loja', sub: (loja ? 'Loja de ' + MESES[+mes.slice(5) - 1] + ' · ' : '') + diaLongo(hoje) });
+  const head = topbar({ title: loja ? loja.NomeFantasia : 'Auditoria em Loja', sub: diaLongo(hoje) });
   if (!S.data) return { html: head + '<main class="wrap">' + carregando() + '</main>' + navbar('inicio') };
   const erros = S.queue.filter(q => q.error).length;
   let corpo;
@@ -619,7 +630,7 @@ VIEWS.inicio = () => {
         <button class="cat wide" data-novo="Anotação">${ICON.note}<span>Anotação<small>Nota cancelada, reserva, ocorrência no caixa</small></span></button>
       </div></div>
       <div class="section gutter"><h2 class="h2">Hoje<button class="linkbtn" data-act="verDia" data-dia="${hoje}">Resumo por horário</button></h2>${kpisHtml(r)}</div>
-      <div class="section"><div class="list"><button class="menu" data-act="declForm" data-dia="${hoje}"><span>Venda informada pelo lojista<small>${dc ? 'Hoje: ' + money(dc.valor) + ' · ' + esc(difTxt(r.total, dc.valor)) : 'Informe o total que a loja declarou no dia'}</small></span>${ICON.right}</button></div></div>
+      <div class="section"><div class="list"><button class="menu" data-act="declForm" data-dia="${hoje}"><span>Venda informada pelo lojista<small>${dc ? 'Hoje: ' + money(dc.valor) + ` · <b style="color:${difCor(r.total, dc.valor)}">${esc(difTxt(r.total, dc.valor))}</b>` : 'Informe o total que a loja declarou no dia'}</small></span>${ICON.right}</button></div></div>
       <div class="section"><h2 class="h2 gutter">Últimos lançamentos<button class="linkbtn" data-tab="lista">Ver todos</button></h2>
         ${dia.length ? `<div class="list">${dia.slice(0, 6).map(l => lancRow(l)).join('')}</div>` : '<div class="card" style="margin:0 16px">' + vazio('Nenhum lançamento hoje.') + '</div>'}</div>`;
   }
@@ -868,7 +879,7 @@ VIEWS.cal = () => {
     const ld = lst.filter(l => l.data === dia), r = resumo(ld);
     const lmDia = lojaMesItem(mes), dc = declDia(dia, idLoja), js = jornAll().filter(j => j.Data === dia && (!j.IdLoja || j.IdLoja === idLoja));
     const lojista = lmDia && lmDia.IdLoja === idLoja && dia <= hoje ? `<div class="kpis" style="margin-top:8px"><div class="kpi wide"><span class="l">Informado pelo lojista</span>
-        ${dc ? `<span class="v sm num">${money(dc.valor)}</span><span class="d ${r.total > dc.valor ? 'down' : 'up'}">${esc(difTxt(r.total, dc.valor))}</span>` : '<span class="d muted">Ainda não informado neste dia.</span>'}
+        ${dc ? `<span class="v sm num">${money(dc.valor)}</span>${difSpan(r.total, dc.valor)}` : '<span class="d muted">Ainda não informado neste dia.</span>'}
         <button class="linkbtn" style="justify-self:start" data-act="declForm" data-dia="${dia}">${dc ? (isMaster() ? 'Corrigir' : 'Ver') : 'Informar o valor'}</button></div></div>` : '';
     det = `<div class="section gutter"><h2 class="h2">${esc(diaLongo(dia))}${ld.length ? `<button class="linkbtn" data-act="verLista" data-dia="${dia}">Ver os ${ld.length} lançamentos</button>` : ''}</h2>${kpisHtml(r)}${lojista}</div>
       ${js.length ? `<div class="section"><h2 class="h2 gutter">Ponto dos auditores</h2><div class="list">${js.map(j => jornRowHtml(j)).join('')}</div></div>` : ''}
@@ -909,11 +920,12 @@ VIEWS.lista = p => {
       </main>` + navbar('lista')
     };
   }
-  const dia = sub ? p.dia : (S.ui.listaDia || today());
-  const mes = dia.slice(0, 7);
+  const hoje = today();
+  const mes = sub ? p.dia.slice(0, 7) : (S.ui.listaMes || hoje.slice(0, 7));
+  const dia = sub ? p.dia : (S.ui.listaDia && S.ui.listaDia.startsWith(mes) ? S.ui.listaDia : '');   // vazio = o mês inteiro
   ensureMes(mes);
-  const idLoja = sub ? p.loja : '';
-  let ls = doDia(dia, idLoja);
+  // merged() já entrega do mais recente para o mais antigo (data e hora do lançamento)
+  let ls = dia ? doDia(dia, sub ? p.loja : '') : doMes(mes, '');
   if (p.hora != null) ls = ls.filter(l => l.cat === 'Venda' && +l.hora.slice(11, 13) === +p.hora);
   const f = sub ? 'todos' : S.ui.listaFiltro;
   const cont = { todos: ls.length, vendas: 0, sd: 0, visitas: 0, perdidas: 0, anot: 0 };
@@ -922,14 +934,30 @@ VIEWS.lista = p => {
   const q = norm(S.ui.busca);
   const vis = ls.filter(l => passa(l) && (!q || sub || norm([l.num, l.obs, l.forma, l.auditor, l.motivo, dec(l.valor)].join(' ')).includes(q)));
   const r = resumo(vis);
+  const lim = sub ? vis.length : (S.ui.listaLim || 150);
+  let linhas = '', diaAnt = '';
+  const totDia = {};
+  if (!dia) vis.forEach(l => { const x = totDia[l.data] || (totDia[l.data] = { n: 0, v: 0 }); x.n++; if (l.cat === 'Venda') x.v += +l.valor || 0; });
+  vis.slice(0, lim).forEach(l => {
+    if (!dia && l.data !== diaAnt) {
+      linhas += `${diaAnt ? '</div>' : ''}<div class="group-h"><span class="cap">${esc(diaLongo(l.data))}</span><span class="num">${totDia[l.data].n} lanç. · ${money(totDia[l.data].v)}</span></div><div class="list">`;
+      diaAnt = l.data;
+    } else if (dia && !diaAnt) { linhas += '<div class="list">'; diaAnt = l.data; }
+    linhas += lancRow(l);
+  });
+  if (linhas) linhas += '</div>';
   return {
     html: head + `<main class="wrap">
       ${sub ? '' : `<div class="section gutter">${abasLista(pend)}</div>
-      <div class="gutter" style="display:flex;gap:8px;align-items:center;padding-top:10px"><label class="date-chip">${ICON.cal.replace('<svg', '<svg style="width:16px;height:16px"')}${dia === today() ? 'Hoje' : esc(diaLongo(dia))}<input type="date" id="listaDia" value="${dia}" max="${today()}" aria-label="Escolher o dia"></label>
+      <div class="section gutter"><div class="month-nav"><button class="cal-nav" data-act="lMes" data-mes="${addMonth(mes, -1)}" aria-label="Mês anterior">${ICON.left}</button><strong class="cap">${mesNome(mes)}</strong>
+        <button class="cal-nav" data-act="lMes" data-mes="${addMonth(mes, 1)}" aria-label="Próximo mês" ${mes >= hoje.slice(0, 7) ? 'disabled style="opacity:.3"' : ''}>${ICON.right}</button></div></div>
+      <div class="gutter" style="display:flex;gap:8px;align-items:center;padding-top:10px"><label class="date-chip">${ICON.cal.replace('<svg', '<svg style="width:16px;height:16px"')}${dia ? (dia === hoje ? 'Hoje' : esc(dBR(dia).slice(0, 5))) : 'Mês inteiro'}<input type="date" id="listaDia" value="${dia}" min="${mes}-01" max="${mes === hoje.slice(0, 7) ? hoje : mes + '-' + pad(daysIn(mes))}" aria-label="Filtrar um dia"></label>
+        ${dia ? '<button class="date-chip" data-act="lTodos" aria-label="Ver o mês inteiro">Ver o mês ✕</button>' : ''}
         <input class="input" id="busca" placeholder="Buscar nº do cupom, valor…" value="${esc(S.ui.busca)}" style="min-height:40px;padding:8px 12px;font-size:15px;flex:1;min-width:0"></div>
       <div class="chips gutter">${[['todos', 'Todos'], ['vendas', 'Vendas'], ['sd', 'Sem documento'], ['visitas', 'Visitas'], ['perdidas', 'Perdidas'], ['anot', 'Anotações']].map(([k, t]) => `<button class="chip" data-lfiltro="${k}" aria-pressed="${f === k}">${t}<b>${cont[k]}</b></button>`).join('')}</div>`}
-      <div class="group-h"><span>${vis.length} lançamento${vis.length === 1 ? '' : 's'}</span><span class="num">${r.n ? money(r.total) : ''}</span></div>
-      ${S.loadingMes === mes ? carregando() : vis.length ? `<div class="list">${vis.map(l => lancRow(l)).join('')}</div>` : vazio('Nenhum lançamento' + (f !== 'todos' || q ? ' com esse filtro.' : ' neste dia.'))}
+      <div class="group-h"><span>${int(vis.length)} lançamento${vis.length === 1 ? '' : 's'}${sub || dia ? '' : ' no mês, do mais recente ao mais antigo'}</span><span class="num">${r.n ? money(r.total) : ''}</span></div>
+      ${S.loadingMes === mes ? carregando() : vis.length ? linhas : vazio('Nenhum lançamento' + (f !== 'todos' || q ? ' com esse filtro.' : dia ? ' neste dia.' : ' neste mês.'))}
+      ${vis.length > lim ? `<div class="section gutter"><button class="btn" style="width:100%" data-act="lMais">Mostrar mais (${int(vis.length - lim)} restantes)</button></div>` : ''}
     </main>` + (sub ? '' : navbar('lista'))
   };
 };
@@ -974,6 +1002,66 @@ function painelEstado() {
   const idLoja = S.ui.pLoja && ljs.some(l => l.IdLoja === S.ui.pLoja) ? S.ui.pLoja : lojaPadrao(mes);
   return { mes, ljs, idLoja };
 }
+const horarioLoja = mes => { const x = lojaMesItem(mes) || {}; return [x.Abre || '10:00', x.Fecha || '22:00']; };
+/* Quanto do horário da loja teve auditor dentro dela (por dia), a partir do ponto */
+function cobertura(mes, js) {
+  const [ab, fe] = horarioLoja(mes).map(hmMin), hoje = today(), agora = hmMin(nowHM());
+  const porDia = new Map();
+  js.forEach(j => {
+    if (!j.Chegada) return;
+    const ini = hmMin(j.Chegada), sd = j.Saidas || [];
+    const marcas = [ini]; sd.forEach(s => { marcas.push(hmMin(s.Saida)); if (s.Volta) marcas.push(hmMin(s.Volta)); });
+    // sem encerramento: hoje conta até agora; em dia passado, até a última marcação
+    const fim = j.Encerramento ? hmMin(j.Encerramento) : j.Data === hoje ? Math.max(agora, ...marcas) : Math.max(...marcas);
+    let segs = [[ini, fim]];
+    sd.forEach(s => {
+      const a = hmMin(s.Saida), b = s.Volta ? hmMin(s.Volta) : fim;
+      segs = segs.flatMap(([x, y]) => (b <= x || a >= y ? [[x, y]] : [[x, Math.min(y, a)], [Math.max(x, b), y]].filter(([p, q]) => q > p)));
+    });
+    porDia.set(j.Data, (porDia.get(j.Data) || []).concat(segs));
+  });
+  const dias = [];
+  for (const [dia, segs] of porDia) {
+    const fimJ = dia === hoje ? Math.max(ab, Math.min(fe, agora)) : fe;
+    const cl = segs.map(([x, y]) => [Math.max(x, ab), Math.min(y, fimJ)]).filter(([x, y]) => y > x).sort((a, b) => a[0] - b[0]);
+    let cob = 0, ate = -1;
+    cl.forEach(([x, y]) => { if (y <= ate) return; cob += y - Math.max(x, ate); ate = y; });
+    dias.push({ dia, aberto: Math.max(0, fimJ - ab), coberto: cob });
+  }
+  dias.sort((a, b) => (a.dia < b.dia ? 1 : -1));
+  const aberto = dias.reduce((s, x) => s + x.aberto, 0), coberto = dias.reduce((s, x) => s + x.coberto, 0);
+  return { dias, aberto, coberto, descoberto: aberto - coberto };
+}
+/* Vendas por semana do mês (segunda a domingo) */
+function semanasMes(mes, vendas) {
+  const m = new Map();
+  vendas.forEach(v => {
+    const d = new Date(v.data + 'T12:00:00'); d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    const k = ymdOf(d), x = m.get(k) || { seg: k, total: 0, n: 0, dias: new Set() };
+    x.total += +v.valor || 0; x.n++; x.dias.add(v.data); m.set(k, x);
+  });
+  return Array.from(m.values()).sort((a, b) => (a.seg < b.seg ? -1 : 1)).map(x => {
+    const f = new Date(x.seg + 'T12:00:00'); f.setDate(f.getDate() + 6);
+    const ini = x.seg < mes + '-01' ? mes + '-01' : x.seg, ult = mes + '-' + pad(daysIn(mes)), fim = ymdOf(f) > ult ? ult : ymdOf(f);
+    return { rot: dBR(ini).slice(0, 5) + ' a ' + dBR(fim).slice(0, 5), total: x.total, n: x.n, dias: x.dias.size };
+  });
+}
+/* Projeção do mês em andamento: o que já foi auditado + a média de cada dia da semana nos dias que faltam */
+function projecao(mes, r) {
+  const hoje = today();
+  if (mes !== hoje.slice(0, 7) || !r.n) return null;
+  const porDia = new Map();
+  r.vendas.forEach(v => porDia.set(v.data, (porDia.get(v.data) || 0) + (+v.valor || 0)));
+  const media = r.total / porDia.size, dow = {};
+  for (const [d, v] of porDia) { const k = new Date(d + 'T12:00:00').getDay(); (dow[k] = dow[k] || []).push(v); }
+  let resto = 0, faltam = 0;
+  for (let d = +hoje.slice(8, 10) + 1; d <= daysIn(mes); d++) {
+    const a = dow[new Date(mes + '-' + pad(d) + 'T12:00:00').getDay()];
+    resto += a ? a.reduce((s, x) => s + x, 0) / a.length : media; faltam++;
+  }
+  return { media, dias: porDia.size, faltam, total: r.total + resto };
+}
+
 VIEWS.painel = () => {
   const head = topbar({ title: 'Painel', sub: 'Resultado da auditoria no mês' });
   if (!S.data) return { html: head + '<main class="wrap">' + carregando() + '</main>' + navbar('painel') };
@@ -984,15 +1072,72 @@ VIEWS.painel = () => {
   const lm = lojaMesItem(mes);
   const decl = lm && lm.IdLoja === idLoja && lm.Declarado !== '' ? +lm.Declarado : null;
   const pend = solicAll().filter(s => s.Status === 'Pendente').length;
-  const m = matriz(r.vendas);
-  const maxF = Math.max(1, ...m.formas.map(f => m.col[f])), maxH = Math.max(1, ...m.horas.map(h => m.lin[h]));
-  const comPerfil = lst.filter(l => l.cat !== 'Anotação');
-  const gen = contar(comPerfil, 'genero'), fx = contar(comPerfil, 'faixa'), mot = contar(lst.filter(l => l.cat === 'Venda perdida'), 'motivo');
-  const aud = contar(lst.map(l => Object.assign({}, l, { auditor: l.auditor || '(não informado)' })), 'auditor');
-  const totG = gen.reduce((s, x) => s + x[1], 0), totF = fx.reduce((s, x) => s + x[1], 0);
-  const semPerfil = r.vendas.filter(v => !ehOnline(v.forma) && (!v.genero || !v.faixa)).length;
-  const bloco = (tit, corpo) => corpo ? `<div class="section"><h2 class="h2 gutter">${tit}</h2><div class="list">${corpo}</div></div>` : '';
-  const cd = compDias(mes, idLoja, lst), js = jornMes(mes, idLoja);
+  const aba = S.ui.pAba || 'resumo';
+  const bloco = (tit, corpo, extra = '') => corpo ? `<div class="section"><h2 class="h2 gutter">${tit}${extra}</h2><div class="list">${corpo}</div></div>` : '';
+  const nota = t => `<p class="note">${t}</p>`;
+  const cd = compDias(mes, idLoja, lst), js = jornMes(mes, idLoja), cob = cobertura(mes, js);
+  const semDados = vazio(loja ? 'Nenhum lançamento de ' + loja.NomeFantasia + ' em ' + mesNome(mes) + '.' : 'Nenhum lançamento em ' + mesNome(mes) + '.');
+  const kpiLojista = `<div class="kpi wide"><span class="l">Auditado × informado pelo lojista</span>
+    ${cd.n ? `<span class="v sm num">${money(cd.aud)} × ${money(cd.dec)}</span>${difSpan(cd.aud, cd.dec, cd.dec ? ' (' + pct(Math.abs(cd.aud - cd.dec), cd.dec) + ')' : '')}
+        <span class="d muted">Soma dos ${cd.n} dia(s) com valor informado pelo lojista${cd.semInfo ? '. Faltam ' + cd.semInfo + ' dia(s) auditado(s)' : ''}.</span>`
+      : decl != null ? `<span class="v sm num">${money(r.total)} × ${money(decl)}</span>${difSpan(r.total, decl)}<span class="d muted">Valor mensal informado antes. Agora o valor é informado por dia.</span>`
+      : `<span class="d muted">Nenhum dia com venda informada pelo lojista.</span><button class="linkbtn" style="justify-self:start" data-act="declForm" data-dia="${mes === hoje.slice(0, 7) ? hoje : mes + '-01'}">Informar a venda de um dia</button>`}</div>`;
+  const kpiCob = `<div class="kpi wide"><span class="l">Loja coberta pela auditoria</span>
+    ${cob.aberto ? `<span class="v sm num">${pct(cob.coberto, cob.aberto)}</span><span class="d">Coberta ${minToH(cob.coberto)} · <b style="color:${cob.descoberto ? 'var(--warn)' : 'inherit'}">descoberta ${minToH(cob.descoberto)}</b></span>
+        <span class="d muted">${cob.dias.length} dia(s) com ponto · loja aberta das ${horarioLoja(mes).join(' às ')}</span>`
+      : '<span class="d muted">Nenhum ponto marcado neste mês.</span>'}</div>`;
+  let corpo = '';
+  if (aba === 'resumo') {
+    const m = matriz(r.vendas), pj = projecao(mes, r), sem = semanasMes(mes, r.vendas);
+    const maxF = Math.max(1, ...m.formas.map(f => m.col[f])), maxH = Math.max(1, ...m.horas.map(h => m.lin[h])), maxS = Math.max(1, ...sem.map(x => x.total));
+    const diasAud = new Set(r.vendas.map(v => v.data)).size;
+    corpo = !lst.length ? semDados : `
+      <div class="section gutter">${kpisHtml(r)}
+        <div class="kpis" style="margin-top:8px">
+          ${pj ? `<div class="kpi wide"><span class="l">Projeção de vendas para ${MESES[+mes.slice(5) - 1]}</span><span class="v sm num">${money(pj.total)}</span>
+            <span class="d muted">Já auditado ${money(r.total)} em ${pj.dias} dia(s) · média de ${money(pj.media)} por dia · faltam ${pj.faltam} dia(s). Estimativa pela média de cada dia da semana, supondo auditoria todos os dias.</span></div>` : ''}
+          ${kpiLojista}${kpiCob}</div>
+        ${cuponsNota(r, false).replace('class="note"', 'class="note" style="padding-inline:0"')}
+        <div class="two" style="margin-top:12px"><button class="btn" data-act="excel" data-mes="${mes}" data-loja="${esc(idLoja)}">${ICON.down}Baixar em Excel</button><button class="btn" data-act="irCal" data-mes="${mes}" data-loja="${esc(idLoja)}">${ICON.cal}Ver calendário</button></div></div>
+      ${bloco('Vendas por semana', sem.map(x => hbar(x.rot, money(x.total), x.total / maxS, ` <span class="muted" style="font-weight:500">${x.dias} dia(s) · ${money(x.total / x.dias)}/dia</span>`)).join(''))}
+      ${sem.length ? nota(`Média de <b>${money(r.total / sem.length)}</b> por semana e <b>${money(r.total / diasAud)}</b> por dia auditado (${diasAud} dia(s)). Semanas de segunda a domingo; a primeira e a última podem ser incompletas.`) : ''}
+      ${bloco('Por forma de pagamento', m.formas.map(f => hbar(f || '(sem forma)', money(m.col[f]), m.col[f] / maxF, ` <span class="muted" style="font-weight:500">${pct(m.col[f], r.total)}</span>`)).join(''))}
+      ${bloco('Por horário', m.horas.map(h => hbar(pad(h) + 'h', money(m.lin[h]), m.lin[h] / maxH, ` <span class="muted" style="font-weight:500">${m.qt[h]} vendas</span>`)).join(''))}
+      <div class="section"><h2 class="h2 gutter">Horário × forma de pagamento</h2>${matrizHtml(r.vendas)}</div>`;
+  } else if (aba === 'lojista') {
+    corpo = `<div class="section gutter"><div class="kpis">${kpiLojista}</div>
+        <button class="btn" style="margin-top:10px;width:100%" data-act="declForm" data-dia="${mes === hoje.slice(0, 7) ? hoje : mes + '-01'}">Informar a venda de um dia</button></div>
+      ${bloco('Auditado × lojista, por dia', cd.dias.map(x => `<button class="row" data-act="declForm" data-dia="${x.dia}"><div><div class="t cap">${esc(DOW[new Date(x.dia + 'T12:00:00').getDay()].slice(0, 3) + ' ' + dBR(x.dia).slice(0, 5))}</div>
+          <div class="s">Auditado ${money(x.aud)} · Lojista ${x.dec == null ? 'não informou' : money(x.dec)}</div></div>
+          <div class="v num" style="font-size:14.5px;color:${x.dec == null ? 'var(--muted)' : difCor(x.aud, x.dec)}">${x.dec == null ? '—' : (x.aud - x.dec > 0 ? '+' : x.aud - x.dec < 0 ? '−' : '') + dec(Math.abs(x.aud - x.dec))}</div></button>`).join(''))}
+      ${cd.dias.length ? nota('Diferença = auditado menos informado. <b style="color:var(--bad)">Vermelho</b>: a auditoria viu mais do que a loja informou. <b style="color:var(--warn)">Amarelo</b>: a loja informou mais do que a auditoria viu. Toque num dia para informar ou corrigir.') : semDados}`;
+  } else if (aba === 'ponto') {
+    const audDia = {}; cd.dias.forEach(x => { audDia[x.dia] = x.aud; });
+    const comCob = cob.dias.filter(x => x.coberto >= 30 && audDia[x.dia]);
+    const est = comCob.reduce((s, x) => s + audDia[x.dia] * x.aberto / x.coberto, 0), base = comCob.reduce((s, x) => s + audDia[x.dia], 0);
+    corpo = `<div class="section gutter"><div class="kpis">${kpiCob}
+        ${comCob.length && cob.coberto ? `<div class="kpi wide"><span class="l">Vendas por hora coberta</span><span class="v sm num">${money(base / (comCob.reduce((s, x) => s + x.coberto, 0) / 60))}</span>
+          <span class="d muted">No mesmo ritmo, o horário inteiro da loja nesses ${comCob.length} dia(s) daria cerca de <b>${money(est)}</b> (auditado: ${money(base)}). É uma estimativa.</span></div>` : ''}</div>
+        <button class="linkbtn" style="margin-top:10px" data-act="lojaMesForm" data-mes="${mes}">Mudar o horário da loja (${horarioLoja(mes).join(' às ')})</button></div>
+      ${bloco('Cobertura por dia', cob.dias.map(x => hbar(DOW[new Date(x.dia + 'T12:00:00').getDay()].slice(0, 3) + ' ' + dBR(x.dia).slice(0, 5), pct(x.coberto, x.aberto), x.aberto ? x.coberto / x.aberto : 0, ` <span class="muted" style="font-weight:500">coberta ${minToH(x.coberto)} · descoberta ${minToH(x.aberto - x.coberto)}</span>`)).join(''))}
+      <div class="section"><h2 class="h2 gutter">Ponto dos auditores<button class="linkbtn" data-act="jornForm" data-dia="${mes === hoje.slice(0, 7) ? hoje : ''}" data-aud="">Lançar ou corrigir</button></h2>
+        ${js.length ? `<div class="list">${js.map(j => jornRowHtml(j, true)).join('')}</div>${nota(esc(jornResumo(js)))}` : nota('Nenhum ponto marcado em ' + mesNome(mes) + '.')}</div>
+      ${nota('Coberta = tempo com pelo menos um auditor dentro da loja, no horário de funcionamento. As saídas (intervalo, banheiro, coleta em outras lojas) contam como loja descoberta.')}`;
+  } else {
+    const comPerfil = lst.filter(l => l.cat !== 'Anotação');
+    const gen = contar(comPerfil, 'genero'), fx = contar(comPerfil, 'faixa'), mot = contar(lst.filter(l => l.cat === 'Venda perdida'), 'motivo');
+    const aud = contar(lst.map(l => Object.assign({}, l, { auditor: l.auditor || '(não informado)' })), 'auditor');
+    const totG = gen.reduce((s, x) => s + x[1], 0), totF = fx.reduce((s, x) => s + x[1], 0);
+    const semPerfil = r.vendas.filter(v => !ehOnline(v.forma) && (!v.genero || !v.faixa)).length;
+    corpo = !lst.length ? semDados : `
+      <div class="section gutter"><div class="kpis"><div class="kpi"><span class="l">Visitas</span><span class="v num">${int(r.visitas)}</span><span class="d muted">entraram e não compraram</span></div>
+        <div class="kpi"><span class="l">Vendas perdidas</span><span class="v num">${int(r.perdidas)}</span><span class="d muted">${pct(r.n, r.n + r.visitas + r.perdidas)} dos clientes compraram</span></div></div></div>
+      ${bloco('Clientes por gênero', gen.map(([k, n]) => hbar(k, pct(n, totG), n / totG, ` <span class="muted" style="font-weight:500">${int(n)}</span>`)).join(''))}
+      ${bloco('Clientes por faixa etária', fx.map(([k, n]) => hbar(k, pct(n, totF), n / totF, ` <span class="muted" style="font-weight:500">${int(n)}</span>`)).join(''))}
+      ${bloco('Vendas perdidas por motivo', mot.map(([k, n]) => hbar(k, int(n), n / mot[0][1])).join(''))}
+      ${bloco('Lançamentos por auditor', aud.map(([k, n]) => hbar(k, int(n), n / aud[0][1])).join(''))}
+      ${semPerfil ? nota(int(semPerfil) + ' venda(s) presenciais sem gênero ou faixa etária (lançamentos antigos).') : ''}`;
+  }
   return {
     html: head + `<main class="wrap">
       <div class="section gutter"><div class="month-nav"><button class="cal-nav" data-act="pMes" data-mes="${addMonth(mes, -1)}" aria-label="Mês anterior">${ICON.left}</button><strong>${mesNome(mes)}</strong>
@@ -1000,29 +1145,8 @@ VIEWS.painel = () => {
       ${ljs.length ? `<div class="chips gutter" style="padding-top:4px">${ljs.map(l => `<button class="chip" data-plj="${esc(l.IdLoja)}" aria-pressed="${l.IdLoja === idLoja}">${esc(l.NomeFantasia)}</button>`).join('')}</div>` : ''}
       ${pend ? `<div class="section gutter"><div class="alert warn">${pend} pedido(s) dos auditores aguardando você.<button data-act="verPedidos">Ver pedidos</button></div></div>` : ''}
       ${!lm && mes >= hoje.slice(0, 7) ? `<div class="section gutter"><div class="alert warn">Nenhuma loja escolhida para ${mesNome(mes)}.<button data-act="lojaMesForm" data-mes="${mes}">Escolher a loja do mês</button></div></div>` : ''}
-      ${S.loadingMes === mes ? carregando() : !lst.length ? vazio(loja ? 'Nenhum lançamento de ' + loja.NomeFantasia + ' em ' + mesNome(mes) + '.' : 'Nenhum lançamento em ' + mesNome(mes) + '.') : `
-      <div class="section gutter">${kpisHtml(r)}
-        <div class="kpis" style="margin-top:8px"><div class="kpi wide"><span class="l">Auditado × informado pelo lojista</span>
-          ${cd.n ? `<span class="v sm num">${money(cd.aud)} × ${money(cd.dec)}</span><span class="d ${cd.aud > cd.dec ? 'down' : 'up'}">${esc(difTxt(cd.aud, cd.dec))}${cd.aud > cd.dec ? ' (' + pct(cd.aud - cd.dec, cd.dec) + ')' : ''}</span>
-              <span class="d muted">Soma dos ${cd.n} dia(s) com valor informado pelo lojista${cd.semInfo ? '. Faltam ' + cd.semInfo + ' dia(s) auditado(s)' : ''}.</span>`
-            : decl != null ? `<span class="v sm num">${money(r.total)} × ${money(decl)}</span><span class="d ${r.total > decl ? 'down' : 'up'}">${esc(difTxt(r.total, decl))}</span><span class="d muted">Valor mensal informado antes. Agora o valor é informado por dia.</span>`
-            : `<span class="d muted">Nenhum dia com venda informada pelo lojista.</span><button class="linkbtn" style="justify-self:start" data-act="declForm" data-dia="${mes === hoje.slice(0, 7) ? hoje : mes + '-01'}">Informar a venda de um dia</button>`}</div></div>
-        ${cuponsNota(r, false).replace('class="note"', 'class="note" style="padding-inline:0"')}
-        ${semPerfil ? `<p class="note" style="padding-inline:0">${int(semPerfil)} venda(s) presenciais sem gênero ou faixa etária (lançamentos antigos).</p>` : ''}
-        <div class="two" style="margin-top:12px"><button class="btn" data-act="excel" data-mes="${mes}" data-loja="${esc(idLoja)}">${ICON.down}Baixar em Excel</button><button class="btn" data-act="irCal" data-mes="${mes}" data-loja="${esc(idLoja)}">${ICON.cal}Ver calendário</button></div></div>
-      ${bloco('Auditado × lojista, por dia', cd.dias.map(x => `<button class="row" data-act="declForm" data-dia="${x.dia}"><div><div class="t cap">${esc(DOW[new Date(x.dia + 'T12:00:00').getDay()].slice(0, 3) + ' ' + dBR(x.dia).slice(0, 5))}</div>
-          <div class="s">Auditado ${money(x.aud)} · Lojista ${x.dec == null ? 'não informou' : money(x.dec)}</div></div>
-          <div class="v num" style="font-size:14.5px;color:${x.dec == null ? 'var(--muted)' : x.aud > x.dec ? 'var(--bad)' : 'inherit'}">${x.dec == null ? '—' : (x.aud - x.dec > 0 ? '+' : x.aud - x.dec < 0 ? '−' : '') + dec(Math.abs(x.aud - x.dec))}</div></button>`).join(''))}
-      ${cd.dias.length ? '<p class="note">Diferença = auditado menos informado. Em vermelho, os dias em que a auditoria viu mais do que a loja informou. Toque num dia para informar ou corrigir.</p>' : ''}
-      ${bloco('Por forma de pagamento', m.formas.map(f => hbar(f || '(sem forma)', money(m.col[f]), m.col[f] / maxF, ` <span class="muted" style="font-weight:500">${pct(m.col[f], r.total)}</span>`)).join(''))}
-      ${bloco('Por horário', m.horas.map(h => hbar(pad(h) + 'h', money(m.lin[h]), m.lin[h] / maxH, ` <span class="muted" style="font-weight:500">${m.qt[h]} vendas</span>`)).join(''))}
-      <div class="section"><h2 class="h2 gutter">Horário × forma de pagamento</h2>${matrizHtml(r.vendas)}</div>
-      ${bloco('Clientes por gênero', gen.map(([k, n]) => hbar(k, pct(n, totG), n / totG, ` <span class="muted" style="font-weight:500">${int(n)}</span>`)).join(''))}
-      ${bloco('Clientes por faixa etária', fx.map(([k, n]) => hbar(k, pct(n, totF), n / totF, ` <span class="muted" style="font-weight:500">${int(n)}</span>`)).join(''))}
-      ${bloco('Vendas perdidas por motivo', mot.map(([k, n]) => hbar(k, int(n), n / mot[0][1])).join(''))}
-      ${bloco('Lançamentos por auditor', aud.map(([k, n]) => hbar(k, int(n), n / aud[0][1])).join(''))}`}
-      <div class="section"><h2 class="h2 gutter">Ponto dos auditores<button class="linkbtn" data-act="jornForm" data-dia="${mes === hoje.slice(0, 7) ? hoje : ''}" data-aud="">Lançar ou corrigir</button></h2>
-        ${js.length ? `<div class="list">${js.map(j => jornRowHtml(j, true)).join('')}</div><p class="note">${esc(jornResumo(js))}</p>` : '<p class="note">Nenhum ponto marcado em ' + mesNome(mes) + '.</p>'}</div>
+      <div class="section gutter"><div class="seg">${[['resumo', 'Vendas'], ['lojista', 'Lojista'], ['ponto', 'Ponto'], ['clientes', 'Clientes']].map(([k, t]) => `<button data-paba="${k}" aria-pressed="${aba === k}">${t}</button>`).join('')}</div></div>
+      ${S.loadingMes === mes ? carregando() : corpo}
     </main>` + navbar('painel')
   };
 };
@@ -1042,7 +1166,7 @@ const jornMes = (mes, idLoja) => jornAll().filter(j => j.Data.startsWith(mes) &&
 function jornResumo(js) {
   const m = new Map();
   js.forEach(j => { const x = m.get(j.Auditor) || { d: 0, min: 0, inc: 0 }; x.d++; const t = jornTrab(j); if (t == null) x.inc++; else x.min += t; m.set(j.Auditor, x); });
-  return Array.from(m.entries()).map(([n, x]) => n + ': ' + x.d + ' dia(s), ' + minToH(x.min) + (x.inc ? ' (' + x.inc + ' sem encerramento)' : '')).join(' · ');
+  return Array.from(m.entries()).map(([n, x]) => n + ': ' + x.d + ' dia(s), ' + minToH(x.min) + ' na loja' + (x.inc ? ' (' + x.inc + ' sem encerramento)' : '')).join(' · ');
 }
 
 /* ---------- Venda informada pelo lojista (formulário) ---------- */
@@ -1062,13 +1186,18 @@ VIEWS.declForm = p => {
         <input class="input money num" id="dValor" inputmode="numeric" autocomplete="off" placeholder="R$ 0,00" value="${dc ? money(dc.valor) : ''}" ${travado ? 'disabled' : ''}>
         <div class="hint">${travado ? 'Informado por ' + esc(dc.por || 'outro usuário') + '. Depois de informado, só o master corrige.' : isMaster() && dc ? 'Informado por ' + esc(dc.por || '') + '. Apague o valor para remover.' : 'O valor que a loja declarou ter vendido no dia inteiro.'}</div></div>
       <div class="card" style="padding:14px;display:grid;gap:4px"><span class="muted" style="font-size:13px">Auditoria neste dia</span><b class="num" style="font-size:20px">${money(r.total)}</b>
-        <span class="muted" style="font-size:13.5px">${int(r.n)} venda${r.n === 1 ? '' : 's'} lançada${r.n === 1 ? '' : 's'}${dc ? ' · ' + esc(difTxt(r.total, dc.valor)) : ''}</span></div>`}
+        <span class="muted" style="font-size:13.5px">${int(r.n)} venda${r.n === 1 ? '' : 's'} lançada${r.n === 1 ? '' : 's'}${dc ? ` · <b style="color:${difCor(r.total, dc.valor)}">${esc(difTxt(r.total, dc.valor))}</b>` : ''}</span></div>`}
       <div id="dErr"></div></div></main>
     <div class="formbar"><button class="btn" data-act="back">${travado || !loja ? 'Voltar' : 'Cancelar'}</button>${travado || !loja ? '<span></span>' : `<button class="btn primary" data-act="saveDecl" data-dia="${dia}">Salvar</button>`}</div>`
   };
 };
 
 /* ---------- Ponto: lançar ou corrigir (master) ---------- */
+function saidaLinha(s) {
+  const mots = lista('saidas').concat(s.Motivo && lista('saidas').indexOf(s.Motivo) < 0 ? [s.Motivo] : []);
+  return `<div class="saida-l"><select class="jsMot" aria-label="Motivo da saída">${mots.map(m => `<option ${m === s.Motivo ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>
+    <input class="input jsSai" type="time" value="${esc(s.Saida || '')}" aria-label="Hora da saída"><input class="input jsVol" type="time" value="${esc(s.Volta || '')}" aria-label="Hora da volta"></div>`;
+}
 VIEWS.jornForm = p => {
   const hoje = today();
   const j = p.aud ? jornAll().find(x => x.Data === p.dia && x.IdAuditor === p.aud) || {} : {};
@@ -1081,7 +1210,10 @@ VIEWS.jornForm = p => {
       <div class="field"><label for="jData">Dia</label><input class="input" id="jData" type="date" value="${p.dia || hoje}" max="${hoje}"></div>
       <div class="alert warn">Se a pessoa já tem ponto nesse dia, os horários abaixo substituem os marcados.</div>`}
       <div class="two">${campo('jChegada', 'Chegada na loja', j.Chegada)}${campo('jEncerramento', 'Encerramento', j.Encerramento)}</div>
-      <div class="two">${campo('jSaidaIntervalo', 'Saída para o intervalo', j.SaidaIntervalo)}${campo('jVoltaIntervalo', 'Volta do intervalo', j.VoltaIntervalo)}</div>
+      <div class="field"><span class="label">Saídas da loja</span><div class="saida-l saida-h"><span>Motivo</span><span>Saiu</span><span>Voltou</span></div>
+        <div id="jSaidas">${(j.Saidas || []).concat([{ Motivo: lista('saidas')[0] }]).map(saidaLinha).join('')}</div>
+        <button type="button" class="linkbtn" style="justify-self:start" data-act="addSaida">Adicionar outra saída</button>
+        <div class="hint">Para apagar uma saída, limpe as duas horas dela. Linhas sem hora são ignoradas.</div></div>
       <p class="note" style="padding-inline:0">Deixe em branco o que não aconteceu. A correção fica registrada no histórico.</p>
       <div id="jErr"></div></div></main>
     <div class="formbar"><button class="btn" data-act="back">Cancelar</button><button class="btn primary" data-act="saveJorn" data-dia="${p.aud ? p.dia : ''}" data-aud="${esc(p.aud || '')}">Salvar</button></div>`
@@ -1117,9 +1249,9 @@ async function baixarExcel(mes, idLoja) {
     const w3 = X.utils.aoa_to_sheet(a3.map(l => l.map(r2))); w3['!cols'] = a3[0].map(() => ({ wch: 19 }));
     X.utils.book_append_sheet(wb, w3, 'Por dia');
     const js = jornMes(mes, idLoja).slice().reverse();
-    const a4 = [['Data', 'Dia', 'Auditor', 'Chegada', 'Saída para o intervalo', 'Volta do intervalo', 'Encerramento', 'Horas trabalhadas']]
-      .concat(js.map(j => { const t = jornTrab(j); return [dBR(j.Data), DOW[new Date(j.Data + 'T12:00:00').getDay()], j.Auditor, j.Chegada, j.SaidaIntervalo, j.VoltaIntervalo, j.Encerramento, t == null ? '' : minToH(t)]; }));
-    const w4 = X.utils.aoa_to_sheet(a4); w4['!cols'] = [10, 10, 20, 10, 20, 17, 13, 16].map(wch => ({ wch }));
+    const a4 = [['Data', 'Dia', 'Auditor', 'Chegada', 'Encerramento', 'Qtd de saídas', 'Tempo fora da loja', 'Tempo na loja', 'Saídas (hora e motivo)']]
+      .concat(js.map(j => { const t = jornTrab(j); return [dBR(j.Data), DOW[new Date(j.Data + 'T12:00:00').getDay()], j.Auditor, j.Chegada, j.Encerramento, (j.Saidas || []).length, minToH(jornFora(j)), t == null ? '' : minToH(t), saidasTxt(j)]; }));
+    const w4 = X.utils.aoa_to_sheet(a4); w4['!cols'] = [10, 10, 20, 10, 13, 13, 17, 13, 70].map(wch => ({ wch }));
     X.utils.book_append_sheet(wb, w4, 'Ponto');
     X.writeFile(wb, 'Auditoria ' + loja.NomeFantasia.replace(/[\\/:*?"<>|]/g, '') + ' ' + mes + '.xlsx');
   } catch (e) { toast(e.message); }
@@ -1133,7 +1265,7 @@ VIEWS.conta = () => {
   const itemFila = q => {
     const t = q.type === 'lanc' ? (q.lanc.Categoria === 'Venda' ? 'Venda de ' + money(q.lanc.Valor) : q.lanc.Categoria) + ' · ' + dtBR(q.lanc.HoraRegistro)
       : q.type === 'decl' ? 'Venda do lojista em ' + dBR(q.decl.Data) + (q.decl.Valor === '' ? ' (remover)' : ' · ' + money(q.decl.Valor))
-      : q.type === 'ponto' ? 'Ponto: ' + JEV_NOME[q.ponto.Evento] + ' · ' + dtBR(q.ponto.Hora)
+      : q.type === 'ponto' ? 'Ponto: ' + JEV_NOME[q.ponto.Evento] + (q.ponto.Motivo ? ' (' + q.ponto.Motivo + ')' : '') + ' · ' + dtBR(q.ponto.Hora)
       : 'Pedido de ' + q.solic.Tipo.toLowerCase();
     return `<div class="row"><div><div class="t">${esc(t)}</div><div class="s">${q.error ? '<span class="pill bad">Não aceito</span> ' + esc(q.error) : 'Aguardando envio'}</div></div>
       <div class="v" style="display:grid;gap:6px">${q.error ? `<button class="quick" data-act="retry" data-qid="${q.qid}">Tentar de novo</button>` : ''}<button class="quick" style="color:var(--bad)" data-act="descartar" data-qid="${q.qid}">Descartar</button></div></div>`;
@@ -1180,6 +1312,8 @@ VIEWS.lojaMesForm = p => {
     html: topbar({ title: 'Loja de ' + mesNome(p.mes), backBtn: true }) + `<main class="wrap form-main"><div class="fields gutter">
       <div class="field" id="fdLoja"><label for="mLoja">Loja auditada<span class="req"> *</span></label><select id="mLoja"><option value="">Escolha a loja…</option>${ativas.map(l => `<option value="${esc(l.IdLoja)}" ${l.IdLoja === x.IdLoja ? 'selected' : ''}>${esc(l.NomeFantasia)}</option>`).join('')}</select>
         <div class="hint">Não encontrou? Cadastre em Conta &gt; Lojas.</div></div>
+      <div class="field" id="fdHr"><span class="label">Horário de funcionamento da loja</span><div class="two"><input class="input" id="mAbre" type="time" value="${esc(x.Abre || '10:00')}" aria-label="Abre às"><input class="input" id="mFecha" type="time" value="${esc(x.Fecha || '22:00')}" aria-label="Fecha às"></div>
+        <div class="hint">Usado no Painel para mostrar quanto do horário da loja ficou coberto pela auditoria.</div></div>
       <div id="mErr"></div></div></main>
     <div class="formbar"><button class="btn" data-act="back">Cancelar</button><button class="btn primary" data-act="saveLojaMes" data-mes="${p.mes}">Salvar</button></div>`
   };
@@ -1255,7 +1389,7 @@ async function desconectarAparelhos(id) {
 }
 
 /* ---------- Listas do formulário (master) ---------- */
-const LISTAS_INFO = [['formas', 'Formas de pagamento', 'A forma "Online" dispensa gênero e faixa etária. "Troca zerada" aceita valor zero.'], ['motivos', 'Motivos de venda perdida', ''], ['faixas', 'Faixas etárias', ''], ['generos', 'Gêneros', '']];
+const LISTAS_INFO = [['formas', 'Formas de pagamento', 'A forma "Online" dispensa gênero e faixa etária. "Troca zerada" aceita valor zero.'], ['motivos', 'Motivos de venda perdida', ''], ['faixas', 'Faixas etárias', ''], ['generos', 'Gêneros', ''], ['saidas', 'Motivos de saída da loja (ponto do auditor)', 'O auditor escolhe um destes motivos ao tocar em "Sair da loja".']];
 VIEWS.listas = () => ({
   form: true,
   html: topbar({ title: 'Listas do formulário', backBtn: true }) + `<main class="wrap form-main"><div class="fields gutter">
@@ -1375,11 +1509,14 @@ const ACOES = {
     const b = $('#btNova'); if (b) { b.textContent = 'Cancelar'; b.dataset.act = 'back'; }
     $('#fdHora').scrollIntoView({ block: 'center', behavior: 'smooth' });
   },
+  pontoSair: d => { S.ui.pontoSair = d.on === '1'; render(); },
   ponto: d => {
     if (d.ev === 'Encerramento' && S.confirmEnc !== true) { S.confirmEnc = true; toast('Toque em Encerrar o dia de novo para confirmar. Depois disso só o master corrige.'); setTimeout(() => { S.confirmEnc = false; }, 5000); return; }
-    S.confirmEnc = false;
-    enqueue({ type: 'ponto', ponto: { Evento: d.ev, Hora: today() + ' ' + nowHM() + ':' + pad(new Date().getSeconds()) } });
-    toast(JEV_NOME[d.ev] + ' marcada às ' + nowHM() + '.');
+    S.confirmEnc = false; S.ui.pontoSair = false;
+    const ponto = { Evento: d.ev, Hora: today() + ' ' + nowHM() + ':' + pad(new Date().getSeconds()) };
+    if (d.ev === 'Saida') { ponto.Id = uid(); ponto.Motivo = d.motivo; }
+    enqueue({ type: 'ponto', ponto });
+    toast(JEV_NOME[d.ev] + (d.motivo ? ' (' + d.motivo + ')' : '') + ': ' + nowHM() + '.');
     render();
   },
   declForm: d => go('declForm', { dia: d.dia }),
@@ -1392,19 +1529,23 @@ const ACOES = {
     toast(v == null ? 'Valor removido.' : 'Venda do lojista em ' + dBR(d.dia).slice(0, 5) + ': ' + money(v) + '.');
     back();
   },
+  addSaida: () => { $('#jSaidas').insertAdjacentHTML('beforeend', saidaLinha({ Motivo: lista('saidas')[0] })); },
   jornForm: d => go('jornForm', { dia: d.dia || today(), aud: d.aud || '' }),
   saveJorn: d => {
     const idAud = d.aud || $('#jAud').value, dia = d.dia || $('#jData').value;
     if (!idAud) return fieldErr('fdJAud', 'Escolha o auditor.');
-    const jornada = { Data: dia, IdAuditor: idAud };
-    JEV.forEach(e => { jornada[e] = $('#j' + e).value || ''; });
-    adminSave('[data-act="saveJorn"]', '#jErr', async () => { const r = await api('salvarJornada', { jornada }); S.data.jornadas = r.jornadas; S.data.jornCols = r.cols; S.ver++; }, 'Ponto salvo.');
+    const jornada = { Data: dia, IdAuditor: idAud, Chegada: $('#jChegada').value || '', Encerramento: $('#jEncerramento').value || '',
+      Saidas: $$('#jSaidas .saida-l').map(l => ({ Motivo: $('.jsMot', l).value, Saida: $('.jsSai', l).value || '', Volta: $('.jsVol', l).value || '' })).filter(x => x.Saida || x.Volta) };
+    adminSave('[data-act="saveJorn"]', '#jErr', async () => { const r = await api('salvarJornada', { jornada }); S.data.jornadas = r.jornadas; S.ver++; }, 'Ponto salvo.');
   },
   dupOk: () => { S.dupOk = true; saveForm(); },
   verDia: d => { S.ui.calMes = d.dia.slice(0, 7); S.ui.calDia = d.dia; S.ui.calLoja = ''; tab('cal'); },
   verLista: d => go('lista', { dia: d.dia, loja: calEstado().idLoja }),
   calMes: d => { S.ui.calMes = d.mes; S.ui.calDia = ''; refresh(); },
   pMes: d => { S.ui.pMes = d.mes; refresh(); },
+  lMes: d => { S.ui.listaMes = d.mes; S.ui.listaDia = ''; S.ui.listaLim = 0; render(); window.scrollTo(0, 0); },
+  lTodos: () => { S.ui.listaDia = ''; S.ui.listaLim = 0; render(); },
+  lMais: () => { S.ui.listaLim = (S.ui.listaLim || 150) + 300; const y = window.scrollY; render(); window.scrollTo(0, y); },
   irCal: d => { S.ui.calMes = d.mes; S.ui.calLoja = d.loja; S.ui.calDia = ''; tab('cal'); },
   excel: d => baixarExcel(d.mes, d.loja),
   verPedidos: () => { S.ui.listaAba = 'ped'; tab('lista'); },
@@ -1432,7 +1573,7 @@ const ACOES = {
   saveLojaMes: d => {
     const idLoja = $('#mLoja').value;
     if (!idLoja) return fieldErr('fdLoja', 'Escolha a loja.');
-    adminSave('[data-act="saveLojaMes"]', '#mErr', async () => { const r = await api('salvarLojaMes', { item: { Mes: d.mes, IdLoja: idLoja } }); S.data.lojaMes = r.lojaMes; S.ver++; }, 'Loja do mês salva.');
+    adminSave('[data-act="saveLojaMes"]', '#mErr', async () => { const r = await api('salvarLojaMes', { item: { Mes: d.mes, IdLoja: idLoja, Abre: $('#mAbre').value || '', Fecha: $('#mFecha').value || '' } }); S.data.lojaMes = r.lojaMes; S.ver++; }, 'Loja do mês salva.');
   },
   lojas: () => go('lojas'),
   novaLoja: () => go('lojaForm', {}),
@@ -1469,7 +1610,7 @@ const ACOES = {
 document.addEventListener('click', e => {
   const hr = e.target.closest('tr[data-hora]');
   if (hr) { const st = calEstado(); return go('lista', { dia: S.ui.calDia || today(), hora: +hr.dataset.hora, loja: st.idLoja }); }
-  const t = e.target.closest('[data-act],[data-tab],[data-novo],[data-lanc],[data-grp],[data-dia],[data-callj],[data-plj],[data-lfiltro],[data-laba],[data-haba],[data-solic],[data-aud],[data-who],[data-tema],[data-segval]');
+  const t = e.target.closest('[data-act],[data-tab],[data-novo],[data-lanc],[data-grp],[data-dia],[data-callj],[data-plj],[data-paba],[data-lfiltro],[data-laba],[data-haba],[data-solic],[data-aud],[data-who],[data-tema],[data-segval]');
   if (!t || t.disabled) return;
   const d = t.dataset;
   if (d.act) { const f = ACOES[d.act]; return f && f(d); }
@@ -1488,7 +1629,8 @@ document.addEventListener('click', e => {
   if (d.dia) { S.ui.calDia = S.ui.calDia === d.dia ? '' : d.dia; return refresh(); }
   if (d.callj) { S.ui.calLoja = d.callj; return refresh(); }
   if (d.plj) { S.ui.pLoja = d.plj; return refresh(); }
-  if (d.lfiltro) { S.ui.listaFiltro = d.lfiltro; return render(); }
+  if (d.paba) { S.ui.pAba = d.paba; render(); return window.scrollTo(0, 0); }
+  if (d.lfiltro) { S.ui.listaFiltro = d.lfiltro; S.ui.listaLim = 0; return render(); }
   if (d.laba) { S.ui.listaAba = d.laba; return render(); }
   if (d.haba) { S.ui.histAba = d.haba; return render(); }
   if (d.solic) return go('solic', { id: d.solic });
@@ -1509,7 +1651,7 @@ document.addEventListener('input', e => {
   if (id === 'busca') { S.ui.busca = el.value; clearTimeout(S.buscaT); S.buscaT = setTimeout(render, 180); }
 });
 document.addEventListener('change', e => {
-  if (e.target.id === 'listaDia') { S.ui.listaDia = e.target.value && e.target.value !== today() ? e.target.value : ''; render(); }
+  if (e.target.id === 'listaDia') { S.ui.listaDia = e.target.value || ''; S.ui.listaLim = 0; render(); }
   if (e.target.id === 'dData' && e.target.value) { cur().p.dia = e.target.value; render(); }
 });
 
