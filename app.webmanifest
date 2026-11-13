@@ -3,7 +3,7 @@
   "short_name": "Aud. Loja",
   "description": "Registro das vendas observadas no caixa da loja auditada no mês — Teresópolis Shopping",
   "lang": "pt-BR",
-  "id": "./",
+  "id": "auditoria-em-loja",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

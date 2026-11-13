@@ -3,8 +3,8 @@
 'use strict';
 
 const CFG = window.APP_CONFIG || {};
-const APP_VERSION = '1.2.0';
-const MIN_SERVER = '1.2.0';
+const APP_VERSION = '1.3.1';
+const MIN_SERVER = '1.3.0';
 
 /* ============================ Utilidades ============================ */
 const $ = (s, r = document) => r.querySelector(s);
@@ -107,8 +107,9 @@ const KV = (() => {
 /* ============================ Estado ============================ */
 const COLMAP = {
   Id: 'id', HoraRegistro: 'hora', Data: 'data', Auditor: 'auditor', IdLoja: 'idLoja', Loja: 'loja', Categoria: 'cat', Tipo: 'tipo',
-  Numero: 'num', FormaPagamento: 'forma', Valor: 'valor', Genero: 'genero', FaixaEtaria: 'faixa', Motivo: 'motivo', Observacao: 'obs', Recebido: 'recebido'
+  Numero: 'num', FormaPagamento: 'forma', Valor: 'valor', Genero: 'genero', FaixaEtaria: 'faixa', Motivo: 'motivo', Observacao: 'obs', Recebido: 'recebido', Origem: 'origem'
 };
+const COLETA = 'Coleta';   // venda informada pelo lojista, com o auditor fora da loja
 const CATS = ['Venda', 'Visita', 'Venda perdida', 'Anotação'];
 const CF = 'CF / NF', SD = 'Sem Documento';
 const LISTAS_PADRAO = {
@@ -208,7 +209,7 @@ function merged() {
     const loja = base ? null : lojaDoMes(n.HoraRegistro.slice(0, 7));
     byId.set(n.Id, Object.assign({}, base || { auditor: S.user && S.user.nome, idLoja: loja ? loja.IdLoja : '', loja: loja ? loja.NomeFantasia : '' }, {
       id: n.Id, hora: n.HoraRegistro, data: n.HoraRegistro.slice(0, 10), cat: n.Categoria, tipo: n.Tipo || '', num: n.Numero === '' || n.Numero == null ? '' : +n.Numero,
-      forma: n.FormaPagamento || '', valor: n.Valor === '' || n.Valor == null ? '' : +n.Valor, genero: n.Genero || '', faixa: n.FaixaEtaria || '', motivo: n.Motivo || '', obs: n.Observacao || '',
+      forma: n.FormaPagamento || '', valor: n.Valor === '' || n.Valor == null ? '' : +n.Valor, genero: n.Genero || '', faixa: n.FaixaEtaria || '', motivo: n.Motivo || '', obs: n.Observacao || '', origem: n.Origem || '',
       _pending: true, _error: q.error || '', _qid: q.qid
     }));
   }
@@ -487,11 +488,12 @@ function pulados(nums) {
   return p;
 }
 function resumo(list) {
-  const r = { vendas: [], total: 0, n: 0, sdN: 0, sdV: 0, cfN: 0, cfV: 0, visitas: 0, perdidas: 0, anot: 0, pulados: 0, min: null, max: null };
+  const r = { vendas: [], total: 0, n: 0, sdN: 0, sdV: 0, cfN: 0, cfV: 0, colN: 0, colV: 0, visitas: 0, perdidas: 0, anot: 0, pulados: 0, min: null, max: null };
   const porDia = new Map();
   for (const l of list) {
     if (l.cat === 'Venda') {
       r.vendas.push(l); r.n++; r.total += +l.valor || 0;
+      if (l.origem === COLETA) { r.colN++; r.colV += +l.valor || 0; }
       if (l.tipo === SD) { r.sdN++; r.sdV += +l.valor || 0; }
       else if (l.tipo === CF) {
         r.cfN++; r.cfV += +l.valor || 0;
@@ -557,7 +559,7 @@ function lancRow(l, o = {}) {
   if (l.cat === 'Venda') p.push(l.tipo === CF ? 'CF nº ' + (l.num || '—') : '');
   if (l.genero || l.faixa) p.push([l.genero, l.faixa].filter(Boolean).join(' '));
   if (l.auditor) p.push(l.auditor.split(' ')[0]);
-  const tags = (l.cat === 'Venda' && l.tipo === SD ? '<span class="pill warn">Sem documento</span> ' : '') +
+  const tags = (l.cat === 'Venda' && l.tipo === SD ? '<span class="pill warn">Sem documento</span> ' : '') + (l.origem === COLETA ? '<span class="pill mut">Informada pelo lojista</span> ' : '') +
     (l._error ? '<span class="pill bad">Não aceito</span> ' : l._pending ? '<span class="pill mut">Na fila</span> ' : '') +
     (solicPendente(l.id) ? '<span class="pill warn">Pedido pendente</span> ' : '');
   return `<button class="row" data-lanc="${esc(l.id)}"><div><div class="t">${esc(lancTitulo(l))}</div>
@@ -569,7 +571,7 @@ function hbar(nome, valor, frac, extra = '') {
 }
 function kpisHtml(r, { perfil = true } = {}) {
   return `<div class="kpis">
-    <div class="kpi"><span class="l">Vendas</span><span class="v num">${money(r.total)}</span><span class="d muted">${int(r.n)} venda${r.n === 1 ? '' : 's'}${r.n ? ' · média ' + money(r.total / r.n) : ''}</span></div>
+    <div class="kpi"><span class="l">Vendas</span><span class="v num">${money(r.total)}</span><span class="d muted">${int(r.n)} venda${r.n === 1 ? '' : 's'}${r.n ? ' · média ' + money(r.total / r.n) : ''}</span>${r.colN ? `<span class="d muted">${int(r.colN)} informada${r.colN === 1 ? '' : 's'} pelo lojista: ${money(r.colV)}</span>` : ''}</div>
     <div class="kpi${r.sdN ? ' alerta' : ''}"><span class="l">Sem documento</span><span class="v num">${money(r.sdV)}</span><span class="d${r.sdN ? '' : ' muted'}">${int(r.sdN)} venda${r.sdN === 1 ? '' : 's'} · ${pct(r.sdV, r.total)} do total</span></div>
     ${perfil ? `<div class="kpi"><span class="l">Visitas</span><span class="v num">${int(r.visitas)}</span></div>
     <div class="kpi"><span class="l">Vendas perdidas</span><span class="v num">${int(r.perdidas)}</span></div>` : ''}
@@ -661,6 +663,8 @@ function ultimoCupom(idLoja, mes, ignorar) {
 function formSync() {
   const fn = $('#fdNum'); if (fn) fn.hidden = grpVal('tipo') !== CF;
   const on = ehOnline(grpVal('forma')) && $('#fdForma');
+  const col = grpVal('coleta') === COLETA;
+  ['fdGenero', 'fdFaixa'].forEach(id => { const f = $('#' + id); if (f) f.hidden = col; });
   ['fdGenero', 'fdFaixa'].forEach(id => { const d = $('#' + id + 'Dica'); if (d) d.textContent = on ? 'opcional em venda online' : ''; });
 }
 
@@ -685,6 +689,8 @@ VIEWS.form = p => {
     form: true,
     html: topbar({ title: titulo, sub: loja ? loja.NomeFantasia : '', backBtn: true }) + `<main class="wrap form-main"><div class="fields gutter">
       ${p.pedido ? '<div class="alert warn">Corrija os campos e explique o motivo. O lançamento só muda depois que o master aprovar.</div>' : ''}
+      ${venda ? `<div class="field" id="fdColeta"><div class="opts" role="group"><button type="button" data-grp="coleta" data-val="${COLETA}" aria-pressed="${b.origem === COLETA}">Eu não estava na loja: o lojista informou depois</button></div>
+        <div class="hint">Marque quando a venda aconteceu com você fora da loja. Não pede gênero nem faixa etária.</div></div>` : ''}
       ${venda ? opcoes('fdTipo', 'Documento', 'tipo', [CF, SD], tipoSel) : ''}
       ${venda ? `<div class="field" id="fdNum" ${tipoSel === CF ? '' : 'hidden'}><label for="fNum">Número do cupom ou nota<span class="req"> *</span></label>
         <input class="input num" id="fNum" inputmode="numeric" autocomplete="off" value="${esc(numVal)}">
@@ -720,8 +726,9 @@ function saveForm(outra) {
   const venda = cat === 'Venda';
   let ok = true;
   const erro = (id, msg) => { fieldErr(id, msg); if (msg && ok) { ok = false; const f = $('#' + id); if (f) f.scrollIntoView({ block: 'center', behavior: 'smooth' }); } };
-  const n = { Id: base ? base.id : uid(), Categoria: cat, Tipo: '', Numero: '', FormaPagamento: '', Valor: '', Genero: '', FaixaEtaria: '', Motivo: '', Observacao: ($('#fObs').value || '').trim() };
+  const n = { Id: base ? base.id : uid(), Categoria: cat, Tipo: '', Numero: '', FormaPagamento: '', Valor: '', Genero: '', FaixaEtaria: '', Motivo: '', Observacao: ($('#fObs').value || '').trim(), Origem: '' };
   if (venda) {
+    if (grpVal('coleta') === COLETA) n.Origem = COLETA;
     n.Tipo = grpVal('tipo'); erro('fdTipo', n.Tipo ? '' : 'Escolha CF / NF ou Sem Documento.');
     if (n.Tipo === CF) {
       const num = ($('#fNum').value || '').trim();
@@ -735,8 +742,8 @@ function saveForm(outra) {
   }
   if (cat === 'Venda perdida') { n.Motivo = grpVal('motivo'); erro('fdMotivo', n.Motivo ? '' : 'Escolha o motivo.'); }
   if (cat !== 'Anotação') {
-    n.Genero = grpVal('genero'); n.FaixaEtaria = grpVal('faixa');
-    const exige = !(venda && ehOnline(n.FormaPagamento));
+    n.Genero = n.Origem === COLETA ? '' : grpVal('genero'); n.FaixaEtaria = n.Origem === COLETA ? '' : grpVal('faixa');
+    const exige = !(venda && (ehOnline(n.FormaPagamento) || n.Origem === COLETA));
     erro('fdGenero', exige && !n.Genero ? 'Escolha o gênero.' : '');
     erro('fdFaixa', exige && !n.FaixaEtaria ? 'Escolha a faixa etária.' : '');
   } else erro('fdObs', n.Observacao ? '' : 'Escreva a anotação.');
@@ -777,7 +784,7 @@ function saveForm(outra) {
     return back();
   }
   if (p.pedido) {
-    const iguais = base.hora === n.HoraRegistro && ['tipo|Tipo', 'num|Numero', 'forma|FormaPagamento', 'valor|Valor', 'genero|Genero', 'faixa|FaixaEtaria', 'motivo|Motivo', 'obs|Observacao'].every(k => { const [a, b] = k.split('|'); return String(base[a] == null ? '' : base[a]) === String(n[b]); });
+    const iguais = base.hora === n.HoraRegistro && ['tipo|Tipo', 'num|Numero', 'forma|FormaPagamento', 'valor|Valor', 'genero|Genero', 'faixa|FaixaEtaria', 'motivo|Motivo', 'obs|Observacao', 'origem|Origem'].every(k => { const [a, b] = k.split('|'); return String(base[a] == null ? '' : base[a]) === String(n[b]); });
     if (iguais) return toast('Nenhum campo foi alterado.');
     const novos = Object.assign({}, n); delete novos.Id;
     enqueue({ type: 'solic', solic: { id_solicitacao: uid(), LancamentoId: base.id, Tipo: 'Alteração', Novos: novos, Motivo: motivo, Loja: base.loja } });
@@ -798,7 +805,8 @@ VIEWS.lanc = p => {
   const linhas = [['Loja', l.loja], ['Data e hora', dtBR(l.hora)], ['Lançado por', l.auditor || '(não informado)']];
   if (l.cat === 'Venda') linhas.push(['Documento', l.tipo + (l.num ? ' nº ' + l.num : '')], ['Forma de pagamento', l.forma || '—']);
   if (l.motivo) linhas.push(['Motivo', l.motivo]);
-  if (l.cat !== 'Anotação') linhas.push(['Gênero', l.genero || '—'], ['Faixa etária', l.faixa || '—']);
+  if (l.origem === COLETA) linhas.push(['Origem', 'Informada pelo lojista, com o auditor fora da loja']);
+  if (l.cat !== 'Anotação' && !(l.origem === COLETA && !l.genero && !l.faixa)) linhas.push(['Gênero', l.genero || '—'], ['Faixa etária', l.faixa || '—']);
   linhas.push(['Observação', l.obs || '—']);
   if (isMaster() && l.recebido && Math.abs(new Date(l.recebido.replace(' ', 'T')) - new Date(l.hora.replace(' ', 'T'))) > 10 * 60e3) linhas.push(['Chegou à planilha', dtBR(l.recebido) + ' (lançado sem internet ou incluído por pedido)']);
   return {
@@ -928,9 +936,9 @@ VIEWS.lista = p => {
   let ls = dia ? doDia(dia, sub ? p.loja : '') : doMes(mes, '');
   if (p.hora != null) ls = ls.filter(l => l.cat === 'Venda' && +l.hora.slice(11, 13) === +p.hora);
   const f = sub ? 'todos' : S.ui.listaFiltro;
-  const cont = { todos: ls.length, vendas: 0, sd: 0, visitas: 0, perdidas: 0, anot: 0 };
-  ls.forEach(l => { if (l.cat === 'Venda') { cont.vendas++; if (l.tipo === SD) cont.sd++; } else if (l.cat === 'Visita') cont.visitas++; else if (l.cat === 'Venda perdida') cont.perdidas++; else cont.anot++; });
-  const passa = l => f === 'todos' || (f === 'vendas' && l.cat === 'Venda') || (f === 'sd' && l.cat === 'Venda' && l.tipo === SD) || (f === 'visitas' && l.cat === 'Visita') || (f === 'perdidas' && l.cat === 'Venda perdida') || (f === 'anot' && l.cat === 'Anotação');
+  const cont = { todos: ls.length, vendas: 0, sd: 0, col: 0, visitas: 0, perdidas: 0, anot: 0 };
+  ls.forEach(l => { if (l.cat === 'Venda') { cont.vendas++; if (l.tipo === SD) cont.sd++; if (l.origem === COLETA) cont.col++; } else if (l.cat === 'Visita') cont.visitas++; else if (l.cat === 'Venda perdida') cont.perdidas++; else cont.anot++; });
+  const passa = l => f === 'todos' || (f === 'vendas' && l.cat === 'Venda') || (f === 'sd' && l.cat === 'Venda' && l.tipo === SD) || (f === 'col' && l.origem === COLETA) || (f === 'visitas' && l.cat === 'Visita') || (f === 'perdidas' && l.cat === 'Venda perdida') || (f === 'anot' && l.cat === 'Anotação');
   const q = norm(S.ui.busca);
   const vis = ls.filter(l => passa(l) && (!q || sub || norm([l.num, l.obs, l.forma, l.auditor, l.motivo, dec(l.valor)].join(' ')).includes(q)));
   const r = resumo(vis);
@@ -954,7 +962,7 @@ VIEWS.lista = p => {
       <div class="gutter" style="display:flex;gap:8px;align-items:center;padding-top:10px"><label class="date-chip">${ICON.cal.replace('<svg', '<svg style="width:16px;height:16px"')}${dia ? (dia === hoje ? 'Hoje' : esc(dBR(dia).slice(0, 5))) : 'Mês inteiro'}<input type="date" id="listaDia" value="${dia}" min="${mes}-01" max="${mes === hoje.slice(0, 7) ? hoje : mes + '-' + pad(daysIn(mes))}" aria-label="Filtrar um dia"></label>
         ${dia ? '<button class="date-chip" data-act="lTodos" aria-label="Ver o mês inteiro">Ver o mês ✕</button>' : ''}
         <input class="input" id="busca" placeholder="Buscar nº do cupom, valor…" value="${esc(S.ui.busca)}" style="min-height:40px;padding:8px 12px;font-size:15px;flex:1;min-width:0"></div>
-      <div class="chips gutter">${[['todos', 'Todos'], ['vendas', 'Vendas'], ['sd', 'Sem documento'], ['visitas', 'Visitas'], ['perdidas', 'Perdidas'], ['anot', 'Anotações']].map(([k, t]) => `<button class="chip" data-lfiltro="${k}" aria-pressed="${f === k}">${t}<b>${cont[k]}</b></button>`).join('')}</div>`}
+      <div class="chips gutter">${[['todos', 'Todos'], ['vendas', 'Vendas'], ['sd', 'Sem documento'], ['col', 'Informadas pelo lojista'], ['visitas', 'Visitas'], ['perdidas', 'Perdidas'], ['anot', 'Anotações']].map(([k, t]) => `<button class="chip" data-lfiltro="${k}" aria-pressed="${f === k}">${t}<b>${cont[k]}</b></button>`).join('')}</div>`}
       <div class="group-h"><span>${int(vis.length)} lançamento${vis.length === 1 ? '' : 's'}${sub || dia ? '' : ' no mês, do mais recente ao mais antigo'}</span><span class="num">${r.n ? money(r.total) : ''}</span></div>
       ${S.loadingMes === mes ? carregando() : vis.length ? linhas : vazio('Nenhum lançamento' + (f !== 'todos' || q ? ' com esse filtro.' : dia ? ' neste dia.' : ' neste mês.'))}
       ${vis.length > lim ? `<div class="section gutter"><button class="btn" style="width:100%" data-act="lMais">Mostrar mais (${int(vis.length - lim)} restantes)</button></div>` : ''}
@@ -1128,7 +1136,7 @@ VIEWS.painel = () => {
     const gen = contar(comPerfil, 'genero'), fx = contar(comPerfil, 'faixa'), mot = contar(lst.filter(l => l.cat === 'Venda perdida'), 'motivo');
     const aud = contar(lst.map(l => Object.assign({}, l, { auditor: l.auditor || '(não informado)' })), 'auditor');
     const totG = gen.reduce((s, x) => s + x[1], 0), totF = fx.reduce((s, x) => s + x[1], 0);
-    const semPerfil = r.vendas.filter(v => !ehOnline(v.forma) && (!v.genero || !v.faixa)).length;
+    const semPerfil = r.vendas.filter(v => !ehOnline(v.forma) && v.origem !== COLETA && (!v.genero || !v.faixa)).length;
     corpo = !lst.length ? semDados : `
       <div class="section gutter"><div class="kpis"><div class="kpi"><span class="l">Visitas</span><span class="v num">${int(r.visitas)}</span><span class="d muted">entraram e não compraram</span></div>
         <div class="kpi"><span class="l">Vendas perdidas</span><span class="v num">${int(r.perdidas)}</span><span class="d muted">${pct(r.n, r.n + r.visitas + r.perdidas)} dos clientes compraram</span></div></div></div>
@@ -1229,9 +1237,9 @@ async function baixarExcel(mes, idLoja) {
     const X = window.XLSX, loja = lojaById(idLoja) || { NomeFantasia: 'Loja' };
     const lst = doMes(mes, idLoja).slice().reverse(), r = resumo(lst);
     const wb = X.utils.book_new();
-    const a1 = [['Data', 'Hora', 'Auditor', 'Loja', 'Lançamento', 'Documento', 'Número', 'Forma de pagamento', 'Valor', 'Gênero', 'Faixa etária', 'Motivo', 'Observação']]
-      .concat(lst.map(l => [dBR(l.data), l.hora.slice(11, 19), l.auditor, l.loja, l.cat, l.tipo, l.num === '' ? null : l.num, l.forma, l.valor === '' ? null : +l.valor, l.genero, l.faixa, l.motivo, l.obs]));
-    const w1 = X.utils.aoa_to_sheet(a1); w1['!cols'] = [10, 9, 16, 20, 14, 15, 9, 20, 11, 11, 11, 16, 50].map(wch => ({ wch }));
+    const a1 = [['Data', 'Hora', 'Auditor', 'Loja', 'Lançamento', 'Documento', 'Número', 'Forma de pagamento', 'Valor', 'Gênero', 'Faixa etária', 'Motivo', 'Observação', 'Origem']]
+      .concat(lst.map(l => [dBR(l.data), l.hora.slice(11, 19), l.auditor, l.loja, l.cat, l.tipo, l.num === '' ? null : l.num, l.forma, l.valor === '' ? null : +l.valor, l.genero, l.faixa, l.motivo, l.obs, l.origem === COLETA ? 'Informada pelo lojista' : '']));
+    const w1 = X.utils.aoa_to_sheet(a1); w1['!cols'] = [10, 9, 16, 20, 14, 15, 9, 20, 11, 11, 11, 16, 50, 22].map(wch => ({ wch }));
     X.utils.book_append_sheet(wb, w1, 'Lançamentos');
     const m = matriz(r.vendas);
     const a2 = [['Hora'].concat(m.formas.map(f => f || '(sem forma)'), ['Total', 'Qtd de vendas'])]
