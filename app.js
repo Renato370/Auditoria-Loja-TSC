@@ -3,8 +3,8 @@
 'use strict';
 
 const CFG = window.APP_CONFIG || {};
-const APP_VERSION = '1.3.1';
-const MIN_SERVER = '1.3.0';
+const APP_VERSION = '1.4.0';
+const MIN_SERVER = '1.4.0';
 
 /* ============================ Utilidades ============================ */
 const $ = (s, r = document) => r.querySelector(s);
@@ -139,7 +139,9 @@ const S = {
   ui: { calMes: '', calLoja: '', calDia: '', listaDia: '', listaFiltro: 'todos', listaAba: 'lanc', busca: '', pMes: '', pLoja: '', histAba: 'alt' },
   installEvt: null,
   audList: null,
-  auditoresLogin: []
+  auditoresLogin: [],
+  loginExtras: [],          // usuários que só aparecem na tela de entrada dos aparelhos onde um master já entrou
+  fotos: {}                 // 'id|carimbo' -> imagem
 };
 
 const rowsToLancs = (cols, rows) => { const keys = cols.map(c => COLMAP[c] || c); return rows.map(r => { const o = {}; keys.forEach((k, i) => { o[k] = r[i]; }); return o; }); };
@@ -183,7 +185,82 @@ function applyBootstrap(b) {
   S.data = Object.assign({}, b, { lancs, solicitacoes: b.solicitacoes || [] });
   S.serverOld = verLt(b.version, MIN_SERVER);
   if (b.me && S.user && b.me.perfil !== S.user.perfil) S.user.perfil = b.me.perfil;
+  if (isMaster() && b.auditores) { S.loginExtras = b.auditores.filter(a => a.perfil === 'Master').map(a => ({ id: a.id, nome: a.nome, foto: a.foto || '' })); KV.set('loginExtras', S.loginExtras); }
   S.ver++;
+  loadFotos();
+}
+
+/* ---------- Fotos dos usuários ---------- */
+const fotoSrc = a => (a && a.foto && S.fotos[a.id + '|' + a.foto]) || '';
+function avatar(a, style = '') {
+  const src = fotoSrc(a);
+  return `<span class="avatar${src ? ' foto' : ''}" style="${style}">${src ? `<img src="${src}" alt="">` : esc(initials(a.nome || '?'))}</span>`;
+}
+/* Quem está logado, com o carimbo da foto atual */
+function eu() {
+  const a = S.user && ((S.data && S.data.auditores) || []).find(x => x.id === S.user.id);
+  return S.user ? { id: S.user.id, nome: S.user.nome, foto: a ? a.foto || '' : '' } : { id: '', nome: '', foto: '' };
+}
+const listasComFoto = () => [S.auditoresLogin || [], S.loginExtras || [], (S.data && S.data.auditores) || [], S.audList || []];
+let fotosBusy = false;
+async function loadFotos() {
+  if (fotosBusy || !S.apiUrl || !online()) return;
+  const quer = new Map();
+  listasComFoto().forEach(l => l.forEach(a => { if (a.foto && !((a.id + '|' + a.foto) in S.fotos)) quer.set(a.id, a.foto); }));
+  if (!quer.size) return;
+  fotosBusy = true;
+  try {
+    const r = await api('fotosAuditores', { ids: Array.from(quer.keys()) }, { auth: false });
+    for (const [id, c] of quer) { const f = r.fotos && r.fotos[id]; S.fotos[id + '|' + c] = f ? f.imagem : ''; if (f) S.fotos[id + '|' + f.carimbo] = f.imagem; }
+    // guarda só as fotos em uso
+    const emUso = new Set(); listasComFoto().forEach(l => l.forEach(a => { if (a.foto) emUso.add(a.id + '|' + a.foto); }));
+    Object.keys(S.fotos).forEach(k => { if (!emUso.has(k)) delete S.fotos[k]; });
+    await KV.set('fotos', S.fotos);
+    fotosBusy = false;
+    if (cur().v === 'login') { const senha = $('#senha') ? $('#senha').value : ''; render(); if (senha && $('#senha')) $('#senha').value = senha; }
+    else if (!(current && current.form)) render();
+  } catch (e) { fotosBusy = false; }
+}
+/* Reduz a foto no aparelho: quadrada, 256 px, JPEG, pequena o bastante para caber numa célula da planilha */
+function fotoReduzida(file) {
+  return new Promise((ok, erro) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      try {
+        const lado = Math.min(img.naturalWidth, img.naturalHeight), c = document.createElement('canvas');
+        c.width = c.height = 256;
+        const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, 256, 256);
+        g.drawImage(img, (img.naturalWidth - lado) / 2, (img.naturalHeight - lado) / 2, lado, lado, 0, 0, 256, 256);
+        let q = 0.85, out = c.toDataURL('image/jpeg', q);
+        while (out.length > 44000 && q > 0.3) { q -= 0.1; out = c.toDataURL('image/jpeg', q); }
+        URL.revokeObjectURL(url);
+        out.length > 44000 ? erro(new Error('Não foi possível reduzir essa imagem. Escolha outra.')) : ok(out);
+      } catch (e) { URL.revokeObjectURL(url); erro(new Error('Não foi possível ler essa imagem.')); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); erro(new Error('Esse arquivo não é uma imagem que o aparelho consiga abrir.')); };
+    img.src = url;
+  });
+}
+/* Bloco "foto + trocar/remover" (na Conta, para a própria pessoa; no cadastro, para o master) */
+function fotoBloco(a) {
+  const tem = !!a.foto;
+  return `<div class="foto-box" data-fbox="${esc(a.id)}">${avatar(a, 'width:72px;height:72px;border-radius:50%;font-size:22px')}
+    <div class="foto-acts"><label class="btn" style="position:relative;overflow:hidden">${tem ? 'Trocar foto' : 'Adicionar foto'}<input type="file" class="foto-in" data-id="${esc(a.id)}" accept="image/*" aria-label="Escolher uma foto" style="position:absolute;inset:0;opacity:0;width:100%"></label>
+      ${tem ? `<button type="button" class="btn" data-act="fotoRemover" data-id="${esc(a.id)}">Remover foto</button>` : ''}</div></div>`;
+}
+async function salvarFoto(id, file) {
+  if (!online()) return toast('Precisa de internet para mudar a foto.');
+  try {
+    const img = file ? await fotoReduzida(file) : '';
+    toast(file ? 'Enviando a foto…' : 'Removendo a foto…');
+    const r = await api('salvarFoto', { id, imagem: img });
+    if (r.foto) { S.fotos[r.id + '|' + r.foto] = img; await KV.set('fotos', S.fotos); }
+    listasComFoto().forEach(l => l.forEach(a => { if (a.id === r.id) a.foto = r.foto; }));
+    S.ver++; await persist();
+    toast(file ? 'Foto atualizada.' : 'Foto removida.');
+    if (current && current.form) { const alvo = listasComFoto().reduce((x, l) => x || l.find(a => a.id === r.id), null) || { id: r.id, nome: '', foto: r.foto }; $$('[data-fbox]').forEach(b => { if (b.dataset.fbox === r.id) b.outerHTML = fotoBloco(alvo); }); }
+    else render();
+  } catch (e) { toast(e.message || 'Não foi possível mudar a foto.'); }
 }
 function rebuildFromData() {
   S.lmap = new Map();
@@ -536,7 +613,7 @@ function topbar({ title, sub = '', backBtn = false, actions = '' }) {
       ${backBtn ? `<button class="icon-btn" data-act="back" aria-label="Voltar">${ICON.back}</button>` : `<span class="hdr-logo">${SELO('currentColor', 5)}</span>`}
       <h1>${esc(title)}${sub ? `<span class="sub">${esc(sub)}</span>` : ''}</h1>
       ${actions}
-      ${!backBtn && S.user ? `<button class="who-chip" data-tab="conta" aria-label="Conta de ${esc(S.user.nome)}"><span>${esc(initials(S.user.nome))}</span>${esc(S.user.nome.split(' ')[0])}</button>` : ''}
+      ${!backBtn && S.user ? `<button class="who-chip" data-tab="conta" aria-label="Conta de ${esc(S.user.nome)}"><span>${fotoSrc(eu()) ? `<img src="${fotoSrc(eu())}" alt="">` : esc(initials(S.user.nome))}</span>${esc(S.user.nome.split(' ')[0])}</button>` : ''}
       <button class="icon-btn${S.syncing ? ' spin' : ''}" data-act="sync" id="syncBtn" aria-label="Sincronizar" title="${off ? 'Sem internet' : 'Sincronizar'}">${off ? ICON.cloudOff : ICON.sync}${pend ? `<span class="sync-dot">${pend}</span>` : ''}</button>
     </div></div></header>`;
 }
@@ -602,11 +679,14 @@ VIEWS.setup = () => ({
 });
 
 VIEWS.login = () => {
-  const list = S.auditoresLogin;
+  // auditores (lista pública) + quem já entrou como master neste aparelho
+  const list = S.auditoresLogin.concat((S.loginExtras || []).filter(e => !S.auditoresLogin.some(a => a.id === e.id)));
   return {
     form: true,
     html: `<div class="login gutter"><div class="brand-mark"><span class="logo">${SELO('#fff')}</span><h1>Auditoria em Loja</h1><img class="shop-logo" src="icons/shopping-logo.png" alt="Teresópolis Shopping"></div>
-      <div class="field"><span class="label">Quem é você?</span><div class="who">${list.length ? list.map(a => `<button data-who="${esc(a.nome)}" aria-pressed="${S.ui.loginSel === a.nome}"><span class="avatar">${esc(initials(a.nome))}</span>${esc(a.nome)}</button>`).join('') : '<div class="muted">Carregando a lista de auditores…</div>'}</div></div>
+      <div class="field"><span class="label">Quem é você?</span><div class="who">${list.length ? list.map(a => `<button data-who="${esc(a.nome)}" aria-pressed="${!S.ui.loginMaster && S.ui.loginSel === a.nome}">${avatar(a)}${esc(a.nome)}</button>`).join('') : '<div class="muted">Carregando a lista de auditores…</div>'}</div></div>
+      ${S.ui.loginMaster ? '<div class="field"><label for="loginNome">Seu nome de master</label><input class="input" id="loginNome" autocomplete="username" autocapitalize="words" placeholder="Digite o seu nome"></div>'
+        : '<button type="button" class="linkbtn" style="justify-self:start" data-act="souMaster">Sou master</button>'}
       <div class="field"><label for="senha">Senha</label><input class="input" id="senha" type="password" autocomplete="current-password"></div>
       <div id="loginErr"></div><button class="btn primary" data-act="loginGo" style="min-height:52px;font-size:16px">Entrar</button>
       <p class="muted" style="font-size:12.5px;margin:0">Versão ${APP_VERSION}. Esqueceu a senha? Peça ao master para definir uma nova.</p></div>`
@@ -1282,8 +1362,8 @@ VIEWS.conta = () => {
   const lm = lojaDoMes(today().slice(0, 7));
   return {
     html: topbar({ title: 'Conta' }) + `<main class="wrap">
-      <div class="section gutter"><div class="card" style="padding:14px;display:flex;gap:12px;align-items:center"><span class="avatar" style="border-radius:50%">${esc(initials(u.nome))}</span>
-        <div><b style="font-size:17px">${esc(u.nome)}</b><div class="muted">${u.perfil === 'Master' ? 'Master' : 'Auditor'}</div></div></div></div>
+      <div class="section gutter"><div class="card" style="padding:14px;display:flex;gap:12px;align-items:center"><div style="flex:1;min-width:0"><b style="font-size:17px">${esc(u.nome)}</b><div class="muted">${u.perfil === 'Master' ? 'Master' : 'Auditor'}</div>
+        <div style="margin-top:10px">${fotoBloco(eu())}</div></div></div></div>
       ${fila.length ? `<div class="section"><h2 class="h2 gutter">Ainda não enviados (${fila.length})</h2><div class="list">${fila.map(itemFila).join('')}</div>
         <p class="note">${online() ? 'O envio é automático. ' : 'Sem internet: o envio acontece quando a conexão voltar. '}Só descarte se o lançamento não for real.</p></div>` : ''}
       ${isMaster() ? `<div class="section"><h2 class="h2 gutter">Administração</h2><div class="list">
@@ -1353,7 +1433,7 @@ VIEWS.lojaForm = p => {
 
 /* ---------- Auditores (master) ---------- */
 async function carregarAuditores() {
-  try { const r = await api('listarAuditores'); S.audList = r.auditores; S.audErr = ''; }
+  try { const r = await api('listarAuditores'); S.audList = r.auditores; S.audErr = ''; loadFotos(); }
   catch (e) { S.audErr = e.message; }
   if (cur().v === 'auditores') render();
 }
@@ -1371,6 +1451,7 @@ VIEWS.audForm = p => {
   return {
     form: true,
     html: topbar({ title: p.id ? a.nome || 'Auditor' : 'Cadastrar auditor', backBtn: true }) + `<main class="wrap form-main"><div class="fields gutter">
+      ${p.id ? `<div class="field"><span class="label">Foto</span>${fotoBloco({ id: p.id, nome: a.nome || '', foto: a.foto || '' })}</div>` : ''}
       <div class="field" id="fdANome"><label for="aNome">Nome<span class="req"> *</span></label><input class="input" id="aNome" maxlength="60" value="${esc(a.nome || '')}"></div>
       <div class="field"><span class="label">Perfil</span><div class="seg" id="aPerfil">${['Auditor', 'Master'].map(s => `<button type="button" data-segval="${s}" aria-pressed="${(a.perfil || 'Auditor') === s}">${s}</button>`).join('')}</div>
         <div class="hint">Auditor lança e pede alterações. Master aprova pedidos, escolhe a loja do mês e vê o Painel.</div></div>
@@ -1427,9 +1508,10 @@ VIEWS.historico = () => {
 async function loadAuditores() {
   try {
     const r = await api('auditores', {}, { auth: false });
-    if (JSON.stringify(r.auditores) === JSON.stringify(S.auditoresLogin)) return;
+    if (JSON.stringify(r.auditores) === JSON.stringify(S.auditoresLogin)) { loadFotos(); return; }
     S.auditoresLogin = r.auditores;
     await KV.set('auditores', r.auditores);
+    loadFotos();
   } catch (e) {
     const c = await KV.get('auditores');
     if (c) S.auditoresLogin = c;
@@ -1445,14 +1527,15 @@ function nomeAparelho() {
 }
 const inicioPerfil = () => (isMaster() ? 'painel' : 'inicio');
 async function doLogin() {
-  const nome = S.ui.loginSel, senha = ($('#senha').value || '').trim();
+  const nome = S.ui.loginMaster ? ($('#loginNome').value || '').trim() : S.ui.loginSel, senha = ($('#senha').value || '').trim();
   const err = $('#loginErr');
-  if (!nome) { err.innerHTML = '<div class="alert bad">Escolha seu nome.</div>'; return; }
+  if (!nome) { err.innerHTML = `<div class="alert bad">${S.ui.loginMaster ? 'Digite o seu nome.' : 'Escolha seu nome.'}</div>`; return; }
   if (!senha) { err.innerHTML = '<div class="alert bad">Digite a senha.</div>'; return; }
   const btn = $('[data-act="loginGo"]'); btn.disabled = true; btn.textContent = 'Entrando…';
   try {
     const r = await api('login', { auth: { nome, senha }, aparelho: nomeAparelho() }, { auth: false });
     S.user = { id: r.user.id, nome: r.user.nome, perfil: r.user.perfil || 'Auditor', token: r.user.token };
+    S.ui.loginMaster = false; S.ui.loginSel = '';
     await persist();
     S.stack = [{ v: inicioPerfil(), p: {} }];
     render();
@@ -1576,6 +1659,8 @@ const ACOES = {
     S.apiUrl = u; persist().then(() => { S.stack = [{ v: 'login', p: {} }]; render(); loadAuditores(); });
   },
   loginGo: () => doLogin(),
+  souMaster: () => { S.ui.loginMaster = true; S.ui.loginSel = ''; render(); $('#loginNome').focus(); },
+  fotoRemover: d => salvarFoto(d.id, null),
   lojaMes: () => go('lojaMes'),
   lojaMesForm: d => go('lojaMesForm', { mes: d.mes }),
   saveLojaMes: d => {
@@ -1643,6 +1728,7 @@ document.addEventListener('click', e => {
   if (d.haba) { S.ui.histAba = d.haba; return render(); }
   if (d.solic) return go('solic', { id: d.solic });
   if (d.aud) return go('audForm', { id: d.aud });
+  if (d.who && S.ui.loginMaster) { S.ui.loginMaster = false; S.ui.loginSel = d.who; render(); $('#senha').focus(); return; }
   if (d.who) { S.ui.loginSel = d.who; $$('[data-who]').forEach(b => b.setAttribute('aria-pressed', b.dataset.who === d.who)); $('#senha').focus(); return; }
   if (d.tema) { setTema(d.tema); $$('[data-tema]').forEach(b => b.setAttribute('aria-pressed', b === t)); return; }
   if (d.segval) { $$('[data-segval]', t.parentNode).forEach(b => b.setAttribute('aria-pressed', b === t)); return; }
@@ -1660,6 +1746,7 @@ document.addEventListener('input', e => {
 });
 document.addEventListener('change', e => {
   if (e.target.id === 'listaDia') { S.ui.listaDia = e.target.value || ''; S.ui.listaLim = 0; render(); }
+  if (e.target.classList && e.target.classList.contains('foto-in')) { const f = e.target.files && e.target.files[0]; if (f) salvarFoto(e.target.dataset.id, f); e.target.value = ''; return; }
   if (e.target.id === 'dData' && e.target.value) { cur().p.dia = e.target.value; render(); }
 });
 
@@ -1695,6 +1782,7 @@ setInterval(() => { if (S.user && document.visibilityState === 'visible' && Date
   }
   rebuildFromData();
   if (!S.apiUrl) { S.stack = [{ v: 'setup', p: {} }]; return render(); }
+  try { S.fotos = (await KV.get('fotos')) || {}; S.loginExtras = (await KV.get('loginExtras')) || []; } catch (e) { /* sem cache */ }
   if (!S.user) { S.stack = [{ v: 'login', p: {} }]; render(); return loadAuditores(); }
   S.stack = [{ v: inicioPerfil(), p: {} }];
   render();
