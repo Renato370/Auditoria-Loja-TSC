@@ -1,10 +1,10 @@
 /* Service worker: guarda o app no aparelho para abrir sem internet. */
-const CACHE = 'auditoria-loja-v1.4.0';
-const SHELL = ['./', 'index.html', 'app.js', 'config.js', 'app.webmanifest', 'icons/loja-192.png', 'icons/loja-512.png', 'icons/shopping-logo.png', 'icons/loja-apple-180.png'];
+const CACHE = 'auditoria-v1.8.0b';
+const SHELL = ['./', 'index.html', 'app.js', 'config.js', 'app-v141.webmanifest', 'icons/selo2-192.png', 'icons/selo2-512.png', 'icons/shopping-logo.png', 'icons/selo2-apple-180.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => {
-    c.add('xlsx.full.min.js').catch(() => {});             // gerador de Excel: guardado à parte, não trava a instalação
+    c.add('xlsx.full.min.js').catch(() => {});             // leitor de Excel: guardado à parte, não trava a instalação
     return c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' })));
   }).then(() => self.skipWaiting()));
 });
@@ -17,9 +17,9 @@ self.addEventListener('fetch', e => {
   const url = new URL(req.url);
   if (url.hostname.endsWith('script.google.com') || url.hostname.endsWith('googleusercontent.com')) return;
   if (url.pathname.endsWith('version.json')) return;      // sempre da rede
-  const externo = ['fonts.googleapis.com', 'fonts.gstatic.com'].includes(url.hostname);
+  const externo = ['fonts.googleapis.com', 'fonts.gstatic.com', 'cdnjs.cloudflare.com'].includes(url.hostname);
   if (url.origin === location.origin || externo) {
-    // rede primeiro (para pegar atualizações); sem internet, usa a cópia guardada
+    // rede primeiro (sem cache do navegador, para pegar atualizações); se estiver sem internet, usa a cópia guardada
     const net = url.origin === location.origin ? fetch(req, { cache: 'no-cache' }) : fetch(req);
     e.respondWith(net.then(res => {
       if (res && (res.ok || res.type === 'opaque')) { const copy = res.clone(); caches.open(CACHE).then(c => c.put(req, copy)); }
